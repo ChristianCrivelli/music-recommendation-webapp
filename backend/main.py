@@ -64,7 +64,7 @@ def fetch_data() -> pd.DataFrame:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     albums_resp = supabase.table("albums").select(
-        "id, title, mbid, release_year, avg_length, rating"
+        "id, title, mbid, release_year, avg_length, rating, created_at, updated_at"
     ).execute()
     albums_df = pd.DataFrame(albums_resp.data)
 
@@ -129,6 +129,16 @@ def fetch_data() -> pd.DataFrame:
     df["artist_mbids"] = df["artist_mbids"].apply(lambda x: x if isinstance(x, list) else [])
     df["artist_names"] = df["artist_names"].fillna("Unknown artist")
 
+    # Defensive strip: some titles were stored with stray leading/trailing
+    # whitespace (fixed at the ingestion source now, but this covers rows
+    # already in the DB). Without this, /api/recommend's exact-match lookup
+    # can silently fail for a title that still shows up fine in autocomplete,
+    # since autocomplete just echoes back whatever string is stored.
+    df["title"] = df["title"].astype(str).str.strip()
+
+    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+    df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce", utc=True)
+
     return df
 
 
@@ -187,11 +197,39 @@ class Recommendation(BaseModel):
     cover_url: Optional[str] = None
 
 
+class MatchedAlbum(BaseModel):
+    """The album the person actually searched for — shown directly under the
+    search bar, separately from the list of recommended cross-references."""
+    title: str
+    artist_names: str
+    release_year: Optional[str] = None
+    rating: Optional[float] = None
+    tags: list[str] = []
+    cover_url: Optional[str] = None
+
+
 class RecommendResponse(BaseModel):
     query: str
     matched_title: Optional[str] = None
+    matched_album: Optional[MatchedAlbum] = None
     suggestions: list[str] = []
     results: list[Recommendation] = []
+
+
+class RecentAlbum(BaseModel):
+    title: str
+    artist_names: str
+    release_year: Optional[str] = None
+    rating: Optional[float] = None
+    tags: list[str] = []
+    cover_url: Optional[str] = None
+    added_at: Optional[str] = None
+    edited: bool = False
+    edited_at: Optional[str] = None
+
+
+class RecentResponse(BaseModel):
+    albums: list[RecentAlbum] = []
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -219,6 +257,16 @@ def recommend(title: str, n: int = 5):
         return RecommendResponse(query=title, suggestions=close, results=[])
 
     idx = matches.index[0]
+    matched_row = matches.iloc[0]
+    matched_album = MatchedAlbum(
+        title=matched_row["title"],
+        artist_names=matched_row.get("artist_names", "Unknown artist"),
+        release_year=str(matched_row["release_year"]) if pd.notna(matched_row["release_year"]) else None,
+        rating=float(matched_row["rating"]) if pd.notna(matched_row["rating"]) else None,
+        tags=matched_row["tags"],
+        cover_url=cover_art_url(matched_row.get("mbid")),
+    )
+
     sim_scores = cosine_similarity([feature_matrix[idx]], feature_matrix)[0]
 
     results = df.copy()
@@ -243,7 +291,44 @@ def recommend(title: str, n: int = 5):
         for _, row in results.iterrows()
     ]
 
-    return RecommendResponse(query=title, matched_title=matches.iloc[0]["title"], results=recs)
+    return RecommendResponse(
+        query=title,
+        matched_title=matched_row["title"],
+        matched_album=matched_album,
+        results=recs,
+    )
+
+
+@app.get("/api/recent", response_model=RecentResponse)
+def recent(n: int = 20):
+    """Recently added/edited albums, newest first. "Edited" means updated_at
+    is meaningfully after created_at (see the DB trigger in
+    schema_additions_updated_at.sql, which skips the bump for no-op updates)."""
+    df, _ = get_cache()
+
+    working = df.copy()
+    working["_sort_ts"] = working[["created_at", "updated_at"]].max(axis=1)
+    working = working.sort_values("_sort_ts", ascending=False, na_position="last")
+    working = working.head(min(max(n, 1), 100))
+
+    albums = []
+    for _, row in working.iterrows():
+        created = row["created_at"]
+        updated = row["updated_at"]
+        edited = bool(pd.notna(created) and pd.notna(updated) and updated > created)
+        albums.append(RecentAlbum(
+            title=row["title"],
+            artist_names=row.get("artist_names", "Unknown artist"),
+            release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
+            rating=float(row["rating"]) if pd.notna(row["rating"]) else None,
+            tags=row["tags"],
+            cover_url=cover_art_url(row.get("mbid")),
+            added_at=created.isoformat() if pd.notna(created) else None,
+            edited=edited,
+            edited_at=updated.isoformat() if edited else None,
+        ))
+
+    return RecentResponse(albums=albums)
 
 
 @app.post("/api/refresh")

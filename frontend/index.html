@@ -158,6 +158,131 @@
     letter-spacing: 0.02em;
   }
 
+  /* ── Matched album: shown right under the search bar ─────────── */
+
+  .matched {
+    display: none;
+    margin-top: 22px;
+    background: var(--card);
+    border-radius: 6px;
+    padding: 16px;
+    box-shadow: 0 10px 22px -14px rgba(0,0,0,0.5), 0 1px 0 rgba(0,0,0,0.05);
+    align-items: center;
+    gap: 16px;
+  }
+  .matched.open { display: flex; }
+  .matched .cover {
+    width: 84px;
+    height: 84px;
+    flex: none;
+    margin: 0;
+  }
+  .matched .matched-info h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 4px;
+  }
+  .matched .matched-info .artist {
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin-bottom: 6px;
+  }
+  .matched .matched-info .meta-row {
+    margin-bottom: 0;
+  }
+  .matched .eyebrow-small {
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    opacity: 0.7;
+    margin-bottom: 2px;
+  }
+
+  /* ── Tabs ──────────────────────────────────────────────────────── */
+
+  .tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 18px;
+  }
+  .tab-btn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: transparent;
+    color: var(--ink);
+    border: 1.5px solid var(--tab);
+    padding: 8px 16px;
+    border-radius: 20px;
+    cursor: pointer;
+    opacity: 0.65;
+  }
+  .tab-btn.active {
+    background: var(--tab);
+    color: #F8FAF3;
+    opacity: 1;
+  }
+
+  .recent-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--card);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 8px 18px -14px rgba(0,0,0,0.4);
+  }
+  .recent-row .cover {
+    width: 56px;
+    height: 56px;
+    flex: none;
+    margin: 0;
+  }
+  .recent-row .recent-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .recent-row h4 {
+    font-family: 'Fraunces', serif;
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .recent-row .artist {
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+  .recent-badge {
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 12px;
+    white-space: nowrap;
+    flex: none;
+  }
+  .recent-badge.added {
+    color: var(--stamp);
+    border: 1px solid var(--stamp);
+  }
+  .recent-badge.edited {
+    color: var(--tab);
+    border: 1px solid var(--tab);
+  }
+  .recent-date {
+    font-size: 10px;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    flex: none;
+  }
+
   /* ── Status / empty states ────────────────────────────────────── */
 
   .status {
@@ -331,6 +456,12 @@
       <p>Type in an album you love.</p>
     </header>
 
+    <div class="tabs">
+      <button class="tab-btn active" id="tabSearch" data-tab="search">Search</button>
+      <button class="tab-btn" id="tabRecent" data-tab="recent">Recently Added</button>
+    </div>
+
+    <div id="searchPane">
     <div class="drawer">
       <div class="drawer-label">Search by Title</div>
       <div class="drawer-face">
@@ -342,6 +473,16 @@
       </div>
     </div>
 
+    <div id="matched" class="matched">
+      <div class="cover" id="matchedCover"></div>
+      <div class="matched-info">
+        <div class="eyebrow-small">In your library</div>
+        <h3 id="matchedTitle"></h3>
+        <div class="artist" id="matchedArtist"></div>
+        <div class="meta-row"><span id="matchedYear"></span><span id="matchedRating"></span></div>
+      </div>
+    </div>
+
     <div id="status" class="status" style="display:none;"></div>
 
     <div id="resultsSection" style="display:none;">
@@ -350,6 +491,12 @@
         <span id="resultsCount"></span>
       </div>
       <div class="cards" id="cards"></div>
+    </div>
+    </div>
+
+    <div id="recentPane" style="display:none;">
+      <div id="recentStatus" class="status"></div>
+      <div id="recentList"></div>
     </div>
 
     <footer>Recommendations pulled live from a hand-curated album library.</footer>
@@ -373,6 +520,20 @@
   const resultsTitle = document.getElementById('resultsTitle');
   const resultsCount = document.getElementById('resultsCount');
   const cardsEl = document.getElementById('cards');
+  const matchedEl = document.getElementById('matched');
+  const matchedCover = document.getElementById('matchedCover');
+  const matchedTitle = document.getElementById('matchedTitle');
+  const matchedArtist = document.getElementById('matchedArtist');
+  const matchedYear = document.getElementById('matchedYear');
+  const matchedRating = document.getElementById('matchedRating');
+
+  const tabSearch = document.getElementById('tabSearch');
+  const tabRecent = document.getElementById('tabRecent');
+  const searchPane = document.getElementById('searchPane');
+  const recentPane = document.getElementById('recentPane');
+  const recentStatus = document.getElementById('recentStatus');
+  const recentList = document.getElementById('recentList');
+  let recentLoaded = false;
 
   let allTitles = [];
   let titlesLoaded = false;
@@ -439,6 +600,7 @@
     if (!title) return;
     suggestBox.classList.remove('open');
     resultsSection.style.display = 'none';
+    matchedEl.classList.remove('open');
     setStatus('Pulling the card for "' + title + '" …');
 
     try {
@@ -446,11 +608,17 @@
       if (!res.ok) throw new Error('Request failed');
       const data = await res.json();
 
+      if (data.matched_album) {
+        renderMatchedAlbum(data.matched_album);
+      }
+
       if (!data.results || !data.results.length) {
         if (data.suggestions && data.suggestions.length) {
           setStatus(`Not in the library yet. Did you mean: ${data.suggestions.join(', ')}?`, true);
-        } else {
+        } else if (!data.matched_album) {
           setStatus(`That album isn't in the database.`, true);
+        } else {
+          setStatus('');
         }
         return;
       }
@@ -461,6 +629,23 @@
       console.error(e);
       setStatus('Could not reach the catalog right now — try again shortly.', true);
     }
+  }
+
+  function renderMatchedAlbum(album) {
+    matchedTitle.textContent = album.title;
+    matchedArtist.textContent = album.artist_names || 'Unknown artist';
+    matchedYear.textContent = album.release_year || '—';
+    matchedRating.textContent = album.rating ? 'My rating: ' + album.rating : '';
+
+    matchedCover.classList.remove('placeholder');
+    if (album.cover_url) {
+      matchedCover.innerHTML = `<img src="${album.cover_url}" alt="${escapeHtml(album.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.remove();" />`;
+    } else {
+      matchedCover.classList.add('placeholder');
+      matchedCover.innerHTML = sleeveSvg();
+    }
+
+    matchedEl.classList.add('open');
   }
 
   function renderResults(data) {
@@ -502,6 +687,73 @@
     return String(str).replace(/[&<>"']/g, c => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[c]));
+  }
+
+  function switchTab(tab) {
+    const toRecent = tab === 'recent';
+    tabSearch.classList.toggle('active', !toRecent);
+    tabRecent.classList.toggle('active', toRecent);
+    searchPane.style.display = toRecent ? 'none' : 'block';
+    recentPane.style.display = toRecent ? 'block' : 'none';
+    if (toRecent && !recentLoaded) loadRecent();
+  }
+  tabSearch.addEventListener('click', () => switchTab('search'));
+  tabRecent.addEventListener('click', () => switchTab('recent'));
+
+  function setRecentStatus(msg, isError = false) {
+    recentStatus.style.display = msg ? 'block' : 'none';
+    recentStatus.textContent = msg || '';
+    recentStatus.classList.toggle('error', isError);
+  }
+
+  async function loadRecent(attempt = 1) {
+    if (API_BASE.includes('your-backend')) {
+      setRecentStatus('Backend URL not set yet — edit API_BASE at the top of the <script> tag in index.html.', true);
+      return;
+    }
+    if (attempt === 1) setRecentStatus('Pulling the latest additions…');
+    try {
+      const res = await fetch(`${API_BASE}/api/recent?n=20`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      recentLoaded = true;
+      if (!data.albums || !data.albums.length) {
+        setRecentStatus('Nothing in the library yet.');
+        return;
+      }
+      setRecentStatus('');
+      renderRecent(data.albums);
+    } catch (e) {
+      console.error('Could not load recent albums', e);
+      if (attempt < 4) {
+        setTimeout(() => loadRecent(attempt + 1), attempt * 4000);
+      } else {
+        setRecentStatus('Could not reach the backend. Try again shortly.', true);
+      }
+    }
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  function renderRecent(albums) {
+    recentList.innerHTML = albums.map(a => `
+      <div class="recent-row">
+        <div class="cover ${a.cover_url ? '' : 'placeholder'}">
+          ${a.cover_url ? `<img src="${a.cover_url}" alt="${escapeHtml(a.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.remove();" />` : sleeveSvg()}
+        </div>
+        <div class="recent-info">
+          <h4>${escapeHtml(a.title)}</h4>
+          <div class="artist">${escapeHtml(a.artist_names || 'Unknown artist')}${a.rating ? ' · My rating: ' + a.rating : ''}</div>
+        </div>
+        <span class="recent-badge ${a.edited ? 'edited' : 'added'}">${a.edited ? 'Edited' : 'Added'}</span>
+        <span class="recent-date">${formatDate(a.edited ? a.edited_at : a.added_at)}</span>
+      </div>
+    `).join('');
   }
 
   loadTitles();
