@@ -64,7 +64,7 @@ def fetch_data() -> pd.DataFrame:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     albums_resp = supabase.table("albums").select(
-        "id, title, mbid, release_year, avg_length, rating, created_at, updated_at"
+        "id, title, mbid, release_year, avg_length, rating, notion_created_at, notion_edited_at"
     ).execute()
     albums_df = pd.DataFrame(albums_resp.data)
 
@@ -117,17 +117,51 @@ def fetch_data() -> pd.DataFrame:
             .reset_index()
             .rename(columns={"artist_name": "artist_names"})
         )
+        artist_credits_df = (
+            artists_flat_df.groupby("album_id")
+            .apply(lambda g: [{"mbid": m, "name": n} for m, n in zip(g["artist_mbid"], g["artist_name"])])
+            .reset_index(name="artist_credits")
+        )
     else:
         artists_df = pd.DataFrame(columns=["album_id", "artist_mbids"])
         artist_names_df = pd.DataFrame(columns=["album_id", "artist_names"])
+        artist_credits_df = pd.DataFrame(columns=["album_id", "artist_credits"])
+
+    # Producers are collected during ingestion but were previously unused by
+    # the recommender. Two albums by different artists but the same producer
+    # is often a genuinely useful "sounds/feels similar" signal — catches
+    # style similarity that pure genre tags miss.
+    producers_resp = (
+        supabase.table("album_contributions")
+        .select("album_id, artists(mbid)")
+        .eq("role", "producer")
+        .execute()
+    )
+    producer_rows = [
+        {"album_id": r["album_id"], "producer_mbid": r["artists"]["mbid"]}
+        for r in producers_resp.data
+        if r.get("artists") and r["artists"].get("mbid")
+    ]
+    producers_df = (
+        pd.DataFrame(producer_rows)
+        .groupby("album_id")["producer_mbid"]
+        .apply(list)
+        .reset_index()
+        .rename(columns={"producer_mbid": "producer_mbids"})
+        if producer_rows else pd.DataFrame(columns=["album_id", "producer_mbids"])
+    )
 
     df = albums_df.merge(tags_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
     df = df.merge(artists_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
     df = df.merge(artist_names_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
+    df = df.merge(artist_credits_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
+    df = df.merge(producers_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
 
     df["tags"] = df["tags"].apply(lambda x: x if isinstance(x, list) else [])
     df["artist_mbids"] = df["artist_mbids"].apply(lambda x: x if isinstance(x, list) else [])
     df["artist_names"] = df["artist_names"].fillna("Unknown artist")
+    df["artist_credits"] = df["artist_credits"].apply(lambda x: x if isinstance(x, list) else [])
+    df["producer_mbids"] = df["producer_mbids"].apply(lambda x: x if isinstance(x, list) else [])
 
     # Defensive strip: some titles were stored with stray leading/trailing
     # whitespace (fixed at the ingestion source now, but this covers rows
@@ -136,15 +170,24 @@ def fetch_data() -> pd.DataFrame:
     # since autocomplete just echoes back whatever string is stored.
     df["title"] = df["title"].astype(str).str.strip()
 
-    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
-    df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce", utc=True)
+    df["created_at"] = pd.to_datetime(df["notion_created_at"], errors="coerce", utc=True)
+    df["updated_at"] = pd.to_datetime(df["notion_edited_at"], errors="coerce", utc=True)
 
     return df
 
 
 def build_feature_matrix(df: pd.DataFrame) -> np.ndarray:
     mlb = MultiLabelBinarizer()
-    tag_matrix = mlb.fit_transform(df["tags"])
+    tag_matrix_binary = mlb.fit_transform(df["tags"])
+
+    # Rarity weighting (TF-IDF-style): a tag shared by half the library (e.g.
+    # "hip-hop") should count for much less than a niche tag two albums
+    # happen to share. Without this, common tags dilute genuinely
+    # distinctive matches.
+    n_albums = max(tag_matrix_binary.shape[0], 1)
+    tag_doc_freq = tag_matrix_binary.sum(axis=0)
+    tag_idf = np.log((n_albums + 1) / (tag_doc_freq + 1)) + 1  # smoothed, always positive
+    tag_matrix = tag_matrix_binary * tag_idf
 
     numeric = df[["release_year", "avg_length"]].apply(pd.to_numeric, errors="coerce").fillna(0)
     scaler = MinMaxScaler()
@@ -153,13 +196,26 @@ def build_feature_matrix(df: pd.DataFrame) -> np.ndarray:
     artist_mlb = MultiLabelBinarizer()
     artist_matrix = artist_mlb.fit_transform(df["artist_mbids"])
 
+    # Producers are a secondary "sounds/feels similar" signal — the same
+    # producer working with two different artists is often a genuinely
+    # useful cross-reference that genre tags alone miss.
+    producer_mlb = MultiLabelBinarizer()
+    producer_matrix = producer_mlb.fit_transform(df["producer_mbids"])
+
+    # Artist weight lowered from 1.5 → 1.0: it was previously strong enough,
+    # combined with sparse/missing tags, to let a bare "same artist" match
+    # dominate a comparison and read as a near-100% match. It's still a
+    # useful signal (see the confidence discount in /api/recommend, which
+    # handles the sparse-tag case directly), just no longer the loudest one.
     TAG_WEIGHT = 2.0
-    ARTIST_WEIGHT = 1.5
+    ARTIST_WEIGHT = 1.0
+    PRODUCER_WEIGHT = 1.0
     NUMERIC_WEIGHT = 0.5
 
     return np.hstack([
         tag_matrix * TAG_WEIGHT,
         artist_matrix * ARTIST_WEIGHT,
+        producer_matrix * PRODUCER_WEIGHT,
         numeric_matrix * NUMERIC_WEIGHT,
     ])
 
@@ -232,6 +288,59 @@ class RecentResponse(BaseModel):
     albums: list[RecentAlbum] = []
 
 
+class LovedAlbum(BaseModel):
+    title: str
+    artist_names: str
+    rating: float
+    release_year: Optional[str] = None
+    cover_url: Optional[str] = None
+
+
+class LovedArtist(BaseModel):
+    name: str
+    album_count: int
+    avg_rating: float
+    weighted_score: float
+
+
+class GenreQuality(BaseModel):
+    tag: str
+    album_count: int
+    avg_rating: float
+    weighted_score: float
+
+
+class GenreFrequency(BaseModel):
+    tag: str
+    album_count: int
+
+
+class RatingBucket(BaseModel):
+    rating: int
+    count: int
+
+
+class DecadeStat(BaseModel):
+    decade: str
+    album_count: int
+    avg_rating: Optional[float] = None
+
+
+class StatsResponse(BaseModel):
+    total_albums: int
+    rated_albums: int
+    untagged_albums: int
+    unique_artists: int
+    unique_tags: int
+    avg_rating: Optional[float] = None
+    most_loved_albums: list[LovedAlbum] = []
+    most_loved_artists: list[LovedArtist] = []
+    top_genres_by_quality: list[GenreQuality] = []
+    top_genres_by_frequency: list[GenreFrequency] = []
+    rating_distribution: list[RatingBucket] = []
+    ratings_by_decade: list[DecadeStat] = []
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -271,6 +380,24 @@ def recommend(title: str, n: int = 5):
 
     results = df.copy()
     results["similarity"] = sim_scores
+
+    # Confidence discount: cosine similarity can't tell "genuinely similar
+    # across several shared tags" apart from "shares an artist but has
+    # little/no tag data to compare" — if both albums have empty tags, that
+    # segment contributes nothing to the comparison either way, so a bare
+    # artist match can still score ~1.0. Discount any candidate that shares
+    # fewer than MIN_CONFIDENT_TAG_OVERLAP tags with the searched album, so
+    # a same-artist-no-data match can't display as a "100% match" the way a
+    # real cross-genre overlap would.
+    TAG_CONFIDENCE_FLOOR = 0.4
+    MIN_CONFIDENT_TAG_OVERLAP = 2
+    query_tags = set(matched_row["tags"])
+    tag_overlap = results["tags"].apply(lambda t: len(query_tags & set(t)))
+    confidence = TAG_CONFIDENCE_FLOOR + (1 - TAG_CONFIDENCE_FLOOR) * (
+        tag_overlap.clip(upper=MIN_CONFIDENT_TAG_OVERLAP) / MIN_CONFIDENT_TAG_OVERLAP
+    )
+    results["similarity"] = results["similarity"] * confidence
+
     results = (
         results[results.index != idx]
         .sort_values("similarity", ascending=False)
@@ -299,17 +426,24 @@ def recommend(title: str, n: int = 5):
     )
 
 
+RECENT_WINDOW_DAYS = 14
+
+
 @app.get("/api/recent", response_model=RecentResponse)
-def recent(n: int = 20):
-    """Recently added/edited albums, newest first. "Edited" means updated_at
-    is meaningfully after created_at (see the DB trigger in
-    schema_additions_updated_at.sql, which skips the bump for no-op updates)."""
+def recent():
+    """Albums added/edited in Notion within the last RECENT_WINDOW_DAYS days,
+    newest first. Based on Notion's own created_time/last_edited_time (see
+    NotionCreatedAt/NotionEditedAt in pull_albums.py) rather than Supabase's
+    created_at/updated_at, since the latter reflects pipeline processing
+    time, not when the entry was actually touched in Notion."""
     df, _ = get_cache()
+
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=RECENT_WINDOW_DAYS)
 
     working = df.copy()
     working["_sort_ts"] = working[["created_at", "updated_at"]].max(axis=1)
-    working = working.sort_values("_sort_ts", ascending=False, na_position="last")
-    working = working.head(min(max(n, 1), 100))
+    working = working[working["_sort_ts"].notna() & (working["_sort_ts"] >= cutoff)]
+    working = working.sort_values("_sort_ts", ascending=False)
 
     albums = []
     for _, row in working.iterrows():
@@ -329,6 +463,164 @@ def recent(n: int = 20):
         ))
 
     return RecentResponse(albums=albums)
+
+
+# Damping constant for the weighted "most loved" scores below — same idea as
+# IMDB's top-250 formula: weighted_score = (sum_ratings + C * global_mean) / (n + C).
+# Pulls low-sample-size artists/genres toward the library-wide average until
+# they've earned enough data to stand on their own, instead of letting one
+# 10/10 album crown an artist or genre outright.
+DAMPING_C = 3.0
+
+
+@app.get("/api/stats", response_model=StatsResponse)
+def stats():
+    df, _ = get_cache()
+
+    total_albums = len(df)
+    untagged_albums = int((df["tags"].apply(len) == 0).sum())
+
+    # Unique artists/tags computed over the full library, not just rated
+    # albums, since these are structural counts, not quality measures.
+    all_artist_keys = set()
+    for credits in df["artist_credits"]:
+        for c in credits:
+            key = c.get("mbid") or c.get("name")
+            if key:
+                all_artist_keys.add(key)
+    unique_artists = len(all_artist_keys)
+
+    all_tags_flat = [t for tags in df["tags"] for t in tags]
+    unique_tags = len(set(all_tags_flat))
+
+    rated = df[df["rating"].apply(pd.notna)].copy()
+    rated["rating"] = rated["rating"].astype(float)
+    rated_albums = len(rated)
+    global_mean = float(rated["rating"].mean()) if rated_albums else 0.0
+
+    # --- Most loved albums: straightforward top-N, no weighting needed ---
+    top_albums_df = rated.sort_values("rating", ascending=False).head(10)
+    most_loved_albums = [
+        LovedAlbum(
+            title=row["title"],
+            artist_names=row.get("artist_names", "Unknown artist"),
+            rating=float(row["rating"]),
+            release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
+            cover_url=cover_art_url(row.get("mbid")),
+        )
+        for _, row in top_albums_df.iterrows()
+    ]
+
+    # --- Most loved artists: damped mean over exploded per-artist credits ---
+    # Explodes on mbid (falling back to name only if mbid is missing) rather
+    # than splitting the display string on commas, since an artist name
+    # could legitimately contain one.
+    artist_rows = [
+        {"key": c.get("mbid") or c.get("name"), "name": c.get("name", "Unknown artist"), "rating": row["rating"]}
+        for _, row in rated.iterrows()
+        for c in row["artist_credits"]
+        if c.get("mbid") or c.get("name")
+    ]
+    most_loved_artists = []
+    if artist_rows:
+        artists_flat = pd.DataFrame(artist_rows)
+        grouped = artists_flat.groupby("key").agg(
+            name=("name", "first"),
+            album_count=("rating", "count"),
+            rating_sum=("rating", "sum"),
+        ).reset_index()
+        grouped["avg_rating"] = grouped["rating_sum"] / grouped["album_count"]
+        grouped["weighted_score"] = (grouped["rating_sum"] + DAMPING_C * global_mean) / (grouped["album_count"] + DAMPING_C)
+        top_artists_df = grouped.sort_values("weighted_score", ascending=False).head(10)
+        most_loved_artists = [
+            LovedArtist(
+                name=r["name"],
+                album_count=int(r["album_count"]),
+                avg_rating=round(float(r["avg_rating"]), 2),
+                weighted_score=round(float(r["weighted_score"]), 2),
+            )
+            for _, r in top_artists_df.iterrows()
+        ]
+
+    # --- Genres: quality (damped mean, rated albums only) vs frequency
+    # (raw count, full library) — kept as two separate views rather than one
+    # blended score, since conflating them lets a single outlier album make
+    # a genre look "beloved" off one data point. ---
+    tag_rows = [
+        {"tag": tag, "rating": row["rating"]}
+        for _, row in rated.iterrows()
+        for tag in row["tags"]
+    ]
+    top_genres_by_quality = []
+    if tag_rows:
+        tags_flat = pd.DataFrame(tag_rows)
+        tag_grouped = tags_flat.groupby("tag").agg(
+            album_count=("rating", "count"),
+            rating_sum=("rating", "sum"),
+        ).reset_index()
+        tag_grouped["avg_rating"] = tag_grouped["rating_sum"] / tag_grouped["album_count"]
+        tag_grouped["weighted_score"] = (tag_grouped["rating_sum"] + DAMPING_C * global_mean) / (tag_grouped["album_count"] + DAMPING_C)
+        top_quality_df = tag_grouped.sort_values("weighted_score", ascending=False).head(10)
+        top_genres_by_quality = [
+            GenreQuality(
+                tag=r["tag"],
+                album_count=int(r["album_count"]),
+                avg_rating=round(float(r["avg_rating"]), 2),
+                weighted_score=round(float(r["weighted_score"]), 2),
+            )
+            for _, r in top_quality_df.iterrows()
+        ]
+
+    top_genres_by_frequency = []
+    if all_tags_flat:
+        freq_series = pd.Series(all_tags_flat).value_counts().head(10)
+        top_genres_by_frequency = [
+            GenreFrequency(tag=t, album_count=int(c)) for t, c in freq_series.items()
+        ]
+
+    # --- Rating distribution (1-10 histogram) ---
+    rating_distribution = []
+    if rated_albums:
+        buckets = rated["rating"].round().astype(int).clip(lower=1, upper=10)
+        bucket_counts = buckets.value_counts().sort_index()
+        rating_distribution = [
+            RatingBucket(rating=int(r), count=int(c)) for r, c in bucket_counts.items()
+        ]
+
+    # --- Ratings by decade ---
+    ratings_by_decade = []
+    with_year = rated.copy()
+    with_year["release_year_num"] = pd.to_numeric(with_year["release_year"], errors="coerce")
+    with_year = with_year.dropna(subset=["release_year_num"])
+    if not with_year.empty:
+        with_year["decade"] = (with_year["release_year_num"] // 10 * 10).astype(int).astype(str) + "s"
+        decade_grouped = with_year.groupby("decade").agg(
+            album_count=("rating", "count"),
+            avg_rating=("rating", "mean"),
+        ).reset_index().sort_values("decade")
+        ratings_by_decade = [
+            DecadeStat(
+                decade=r["decade"],
+                album_count=int(r["album_count"]),
+                avg_rating=round(float(r["avg_rating"]), 2),
+            )
+            for _, r in decade_grouped.iterrows()
+        ]
+
+    return StatsResponse(
+        total_albums=total_albums,
+        rated_albums=rated_albums,
+        untagged_albums=untagged_albums,
+        unique_artists=unique_artists,
+        unique_tags=unique_tags,
+        avg_rating=round(global_mean, 2) if rated_albums else None,
+        most_loved_albums=most_loved_albums,
+        most_loved_artists=most_loved_artists,
+        top_genres_by_quality=top_genres_by_quality,
+        top_genres_by_frequency=top_genres_by_frequency,
+        rating_distribution=rating_distribution,
+        ratings_by_decade=ratings_by_decade,
+    )
 
 
 @app.post("/api/refresh")
