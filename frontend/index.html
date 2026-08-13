@@ -427,6 +427,14 @@
   }
   .status.error { color: var(--stamp); }
 
+  .disambig-option {
+    color: var(--tab);
+    text-decoration: underline;
+    cursor: pointer;
+    margin: 0 2px;
+  }
+  .disambig-option:hover { color: var(--stamp); }
+
   /* ── Results: fanned index cards ──────────────────────────────── */
 
   .results-head {
@@ -680,8 +688,9 @@
   let recentLoaded = false;
   let statsLoaded = false;
 
-  let allTitles = [];
+  let allAlbums = [];      // [{title, artist_names}]
   let titlesLoaded = false;
+  let selectedArtistHint = null;  // set when a suggestion is clicked, to disambiguate duplicate titles
 
   // Render's free tier spins down after 15 min idle — the first request can
   // take 30-60s to wake it back up. Retry a few times with backoff instead
@@ -696,7 +705,11 @@
       const res = await fetch(`${API_BASE}/api/albums`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      allTitles = data.titles || [];
+      // Prefer the richer title+artist pairs; fall back to the plain title
+      // list for older backend deployments that predate this field.
+      allAlbums = (data.albums && data.albums.length)
+        ? data.albums
+        : (data.titles || []).map(t => ({ title: t, artist_names: '' }));
       titlesLoaded = true;
       setStatus('');
     } catch (e) {
@@ -712,22 +725,38 @@
   function showSuggestions(query) {
     const q = query.trim().toLowerCase();
     if (!q) { suggestBox.classList.remove('open'); return; }
-    const matches = allTitles.filter(t => t.toLowerCase().includes(q)).slice(0, 8);
+    const matches = allAlbums.filter(a => a.title.toLowerCase().includes(q)).slice(0, 8);
     if (!matches.length) { suggestBox.classList.remove('open'); return; }
-    suggestBox.innerHTML = matches.map(t => `<div data-title="${t.replace(/"/g,'&quot;')}">${t}</div>`).join('');
+
+    // Two different albums can share an exact title — show the artist too
+    // whenever a title appears more than once among the current matches,
+    // so both are reachable instead of only whichever one loads first.
+    const titleCounts = {};
+    matches.forEach(a => { titleCounts[a.title] = (titleCounts[a.title] || 0) + 1; });
+
+    suggestBox.innerHTML = matches.map(a => {
+      const label = titleCounts[a.title] > 1 && a.artist_names
+        ? `${a.title} — ${a.artist_names}`
+        : a.title;
+      return `<div data-title="${a.title.replace(/"/g, '&quot;')}" data-artist="${(a.artist_names || '').replace(/"/g, '&quot;')}">${escapeHtml(label)}</div>`;
+    }).join('');
     suggestBox.classList.add('open');
   }
 
   suggestBox.addEventListener('click', (e) => {
-    const t = e.target.getAttribute('data-title');
-    if (t) {
-      searchInput.value = t;
+    const target = e.target.closest('[data-title]');
+    if (target) {
+      searchInput.value = target.getAttribute('data-title');
+      selectedArtistHint = target.getAttribute('data-artist') || null;
       suggestBox.classList.remove('open');
       runSearch();
     }
   });
 
-  searchInput.addEventListener('input', () => showSuggestions(searchInput.value));
+  searchInput.addEventListener('input', () => {
+    selectedArtistHint = null;  // typing invalidates any prior disambiguation
+    showSuggestions(searchInput.value);
+  });
   searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.search-row')) suggestBox.classList.remove('open');
@@ -740,7 +769,13 @@
     statusEl.classList.toggle('error', isError);
   }
 
-  async function runSearch() {
+  function setStatusHtml(html, isError = false) {
+    statusEl.style.display = html ? 'block' : 'none';
+    statusEl.innerHTML = html || '';
+    statusEl.classList.toggle('error', isError);
+  }
+
+  async function runSearch(artistOverride) {
     const title = searchInput.value.trim();
     if (!title) return;
     suggestBox.classList.remove('open');
@@ -748,10 +783,26 @@
     matchedEl.classList.remove('open');
     setStatus('Pulling the card for "' + title + '" …');
 
+    const artistHint = artistOverride !== undefined ? artistOverride : selectedArtistHint;
+
     try {
-      const res = await fetch(`${API_BASE}/api/recommend?title=${encodeURIComponent(title)}&n=6`);
+      let url = `${API_BASE}/api/recommend?title=${encodeURIComponent(title)}&n=6`;
+      if (artistHint) url += `&artist=${encodeURIComponent(artistHint)}`;
+
+      const res = await fetch(url);
       if (!res.ok) throw new Error('Request failed');
       const data = await res.json();
+
+      // Multiple albums share this exact title and the artist hint (if any)
+      // didn't narrow it down to one — ask which was meant rather than
+      // silently guessing.
+      if (data.other_matches && data.other_matches.length) {
+        const options = data.other_matches.map(m =>
+          `<span class="disambig-option" data-title="${escapeHtml(m.title)}" data-artist="${escapeHtml(m.artist_names)}">${escapeHtml(m.artist_names || 'Unknown artist')}</span>`
+        ).join(', ');
+        setStatusHtml(`Multiple albums are titled "${escapeHtml(title)}" — which did you mean? ${options}`);
+        return;
+      }
 
       if (data.matched_album) {
         renderMatchedAlbum(data.matched_album);
@@ -775,6 +826,14 @@
       setStatus('Could not reach the catalog right now — try again shortly.', true);
     }
   }
+
+  // Handles clicks on the disambiguation options rendered by setStatusHtml above.
+  statusEl.addEventListener('click', (e) => {
+    const opt = e.target.closest('.disambig-option');
+    if (!opt) return;
+    searchInput.value = opt.getAttribute('data-title');
+    runSearch(opt.getAttribute('data-artist') || null);
+  });
 
   function renderMatchedAlbum(album) {
     matchedTitle.textContent = album.title;

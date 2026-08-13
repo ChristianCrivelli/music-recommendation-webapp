@@ -234,12 +234,16 @@ def get_cache(force: bool = False):
 # ── API models ───────────────────────────────────────────────────────────────
 
 def cover_art_url(mbid: Optional[str]) -> Optional[str]:
-    """Cover Art Archive serves images by release MBID — no API key, no extra call.
-    The URL may 404 if that release was never scanned in; the frontend falls
-    back to a placeholder sleeve in that case."""
+    """Cover Art Archive serves images by MBID — no API key, no extra call.
+    albums.mbid now stores the release-GROUP id (see the ingestion-side fix
+    that stopped it from storing a specific, non-stable release id — that
+    was the root cause of the mass album-duplication bug), so this hits the
+    release-group endpoint rather than /release/. The URL may still 404 if
+    no release in the group was ever scanned in; the frontend falls back to
+    a placeholder sleeve in that case."""
     if not mbid:
         return None
-    return f"https://coverartarchive.org/release/{mbid}/front-500"
+    return f"https://coverartarchive.org/release-group/{mbid}/front-500"
 
 
 class Recommendation(BaseModel):
@@ -264,11 +268,23 @@ class MatchedAlbum(BaseModel):
     cover_url: Optional[str] = None
 
 
+class TitleMatch(BaseModel):
+    """One of possibly several albums sharing an exact title — used to
+    disambiguate when title alone isn't a unique key (two different artists
+    can and do release albums with the same name)."""
+    title: str
+    artist_names: str
+
+
 class RecommendResponse(BaseModel):
     query: str
     matched_title: Optional[str] = None
     matched_album: Optional[MatchedAlbum] = None
     suggestions: list[str] = []
+    # Populated when `title` matched more than one album and `artist` either
+    # wasn't provided or didn't narrow it down to exactly one — lets the
+    # frontend show "which one did you mean?" instead of silently guessing.
+    other_matches: list[TitleMatch] = []
     results: list[Recommendation] = []
 
 
@@ -348,15 +364,43 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/api/albums")
+class AlbumSummary(BaseModel):
+    title: str
+    artist_names: str
+
+
+class AlbumsResponse(BaseModel):
+    # Kept for backward compatibility with any existing frontend build —
+    # plain title strings, deduplicated. Ambiguous for title collisions.
+    titles: list[str] = []
+    # Preferred going forward: title+artist pairs, so a frontend can tell
+    # two same-titled albums apart in autocomplete instead of only ever
+    # being able to reach whichever one the backend happens to pick first.
+    albums: list[AlbumSummary] = []
+
+
+@app.get("/api/albums", response_model=AlbumsResponse)
 def list_albums():
-    """Returns every album title currently in the library (for autocomplete)."""
+    """Returns every album currently in the library (for autocomplete),
+    as both a flat title list (legacy) and title+artist pairs (preferred)."""
     df, _ = get_cache()
-    return {"titles": sorted(df["title"].dropna().unique().tolist())}
+    dedup = (
+        df[["title", "artist_names"]]
+        .fillna({"artist_names": "Unknown artist"})
+        .drop_duplicates()
+        .sort_values(["title", "artist_names"])
+    )
+    return AlbumsResponse(
+        titles=sorted(df["title"].dropna().unique().tolist()),
+        albums=[
+            AlbumSummary(title=r["title"], artist_names=r["artist_names"])
+            for _, r in dedup.iterrows()
+        ],
+    )
 
 
 @app.get("/api/recommend", response_model=RecommendResponse)
-def recommend(title: str, n: int = 5):
+def recommend(title: str, n: int = 5, artist: Optional[str] = None):
     df, feature_matrix = get_cache()
 
     matches = df[df["title"].str.lower() == title.strip().lower()]
@@ -364,6 +408,24 @@ def recommend(title: str, n: int = 5):
     if matches.empty:
         close = difflib.get_close_matches(title, df["title"].tolist(), n=5, cutoff=0.4)
         return RecommendResponse(query=title, suggestions=close, results=[])
+
+    # Title alone isn't guaranteed unique — two different albums can share a
+    # name. If more than one album matched, use the artist hint (when given)
+    # to narrow it down; if that still leaves more than one candidate (or no
+    # hint was given at all), don't guess — hand back the list of candidates
+    # so the frontend can ask which one was meant.
+    if len(matches) > 1 and artist:
+        artist_query = artist.strip().lower()
+        narrowed = matches[matches["artist_names"].str.lower().str.contains(artist_query, na=False, regex=False)]
+        if not narrowed.empty:
+            matches = narrowed
+
+    if len(matches) > 1:
+        other_matches = [
+            TitleMatch(title=row["title"], artist_names=row.get("artist_names", "Unknown artist"))
+            for _, row in matches.iterrows()
+        ]
+        return RecommendResponse(query=title, matched_title=title, other_matches=other_matches, results=[])
 
     idx = matches.index[0]
     matched_row = matches.iloc[0]
