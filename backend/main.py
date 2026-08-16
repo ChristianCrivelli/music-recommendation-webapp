@@ -57,16 +57,42 @@ _cache = {
 }
 
 
+def paginate(query_builder_fn, page_size: int = 1000):
+    """
+    Runs a Supabase select in pages of `page_size` rows via .range(), and
+    returns the concatenated list of all rows. Supabase/PostgREST caps
+    unpaginated selects at 1000 rows by default — without this, any table
+    over 1000 rows gets silently truncated.
+
+    query_builder_fn: a zero-arg function that returns a FRESH Supabase
+    query builder each call (not a response), e.g.:
+        lambda: supabase.table("albums").select("id, title")
+    A fresh builder is needed each loop iteration because .range() must be
+    applied to an unexecuted query, and builders are single-use once
+    .execute() is called.
+    """
+    all_rows = []
+    start = 0
+    while True:
+        resp = query_builder_fn().range(start, start + page_size - 1).execute()
+        rows = resp.data or []
+        all_rows.extend(rows)
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return all_rows
+
+
 def fetch_data() -> pd.DataFrame:
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are not set")
 
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    albums_resp = supabase.table("albums").select(
+    albums_data = paginate(lambda: supabase.table("albums").select(
         "id, title, mbid, release_year, avg_length, rating, notion_created_at, notion_edited_at"
-    ).execute()
-    albums_df = pd.DataFrame(albums_resp.data)
+    ))
+    albums_df = pd.DataFrame(albums_data)
 
     if albums_df.empty:
         raise RuntimeError(
@@ -76,10 +102,8 @@ def fetch_data() -> pd.DataFrame:
             "/ tags / album_contributions / artists."
         )
 
-    tags_resp = (
-        supabase.table("album_tags").select("album_id, tags(name)").execute()
-    )
-    tag_rows = [{"album_id": r["album_id"], "tag": r["tags"]["name"]} for r in tags_resp.data]
+    tags_data = paginate(lambda: supabase.table("album_tags").select("album_id, tags(name)"))
+    tag_rows = [{"album_id": r["album_id"], "tag": r["tags"]["name"]} for r in tags_data]
     tags_df = (
         pd.DataFrame(tag_rows)
         .groupby("album_id")["tag"]
@@ -89,11 +113,10 @@ def fetch_data() -> pd.DataFrame:
         if tag_rows else pd.DataFrame(columns=["album_id", "tags"])
     )
 
-    artists_resp = (
-        supabase.table("album_contributions")
+    artists_data = paginate(
+        lambda: supabase.table("album_contributions")
         .select("album_id, artists(mbid, name)")
         .eq("role", "artist")
-        .execute()
     )
     artist_rows = [
         {
@@ -101,7 +124,7 @@ def fetch_data() -> pd.DataFrame:
             "artist_mbid": r["artists"]["mbid"],
             "artist_name": r["artists"]["name"],
         }
-        for r in artists_resp.data
+        for r in artists_data
     ]
     artists_flat_df = pd.DataFrame(artist_rows)
     if not artists_flat_df.empty:
@@ -131,15 +154,14 @@ def fetch_data() -> pd.DataFrame:
     # the recommender. Two albums by different artists but the same producer
     # is often a genuinely useful "sounds/feels similar" signal — catches
     # style similarity that pure genre tags miss.
-    producers_resp = (
-        supabase.table("album_contributions")
+    producers_data = paginate(
+        lambda: supabase.table("album_contributions")
         .select("album_id, artists(mbid)")
         .eq("role", "producer")
-        .execute()
     )
     producer_rows = [
         {"album_id": r["album_id"], "producer_mbid": r["artists"]["mbid"]}
-        for r in producers_resp.data
+        for r in producers_data
         if r.get("artists") and r["artists"].get("mbid")
     ]
     producers_df = (
@@ -174,7 +196,6 @@ def fetch_data() -> pd.DataFrame:
     df["updated_at"] = pd.to_datetime(df["notion_edited_at"], errors="coerce", utc=True)
 
     return df
-
 
 def build_feature_matrix(df: pd.DataFrame) -> np.ndarray:
     mlb = MultiLabelBinarizer()
