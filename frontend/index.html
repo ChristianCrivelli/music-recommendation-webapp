@@ -127,6 +127,45 @@
   button#go:hover { transform: translateY(-1px); }
   button#go:active { transform: translateY(0); }
 
+  /* ── Browse drawer (search-row's siblings, same visual language) ─ */
+
+  .browse-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .browse-row select,
+  .browse-row input {
+    flex: 1;
+    min-width: 160px;
+    font-family: 'Fraunces', serif;
+    font-size: 15px;
+    padding: 10px 12px;
+    border: 1.5px solid var(--card-line);
+    background: #fff;
+    color: var(--ink);
+    border-radius: 4px;
+    outline: none;
+  }
+  .browse-row select:focus,
+  .browse-row input:focus { border-color: var(--accent); }
+  button#browseGo {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: var(--stamp);
+    color: #F8FAF3;
+    border: none;
+    padding: 0 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+    flex: none;
+  }
+  button#browseGo:hover { transform: translateY(-1px); }
+  button#browseGo:active { transform: translateY(0); }
+
   .suggest {
     position: absolute;
     top: calc(100% + 6px);
@@ -389,6 +428,14 @@
     color: var(--ink-soft);
     text-align: right;
   }
+  .bar-value.bar-value--decade {
+    width: 64px;
+    white-space: nowrap;
+  }
+  .bar-count {
+    font-size: 10px;
+    opacity: 0.7;
+  }
 
   .histogram {
     display: flex;
@@ -555,6 +602,7 @@
   .meta-row {
     display: flex;
     justify-content: space-between;
+    gap: 8px;
     font-size: 11px;
     color: var(--ink-soft);
     margin-bottom: 10px;
@@ -600,6 +648,7 @@
 
     <div class="tabs">
       <button class="tab-btn active" id="tabSearch" data-tab="search">Search</button>
+      <button class="tab-btn" id="tabBrowse" data-tab="browse">Browse</button>
       <button class="tab-btn" id="tabRecent" data-tab="recent">Recently Added</button>
       <button class="tab-btn" id="tabStats" data-tab="stats">Stats</button>
     </div>
@@ -635,6 +684,35 @@
       </div>
       <div class="cards" id="cards"></div>
     </div>
+    </div>
+
+    <div id="browsePane" style="display:none;">
+      <div class="drawer">
+        <div class="drawer-label">Browse by Genre / Artist / Producer</div>
+        <div class="drawer-face">
+          <div class="browse-row">
+            <select id="browseTag">
+              <option value="">All genres/tags</option>
+            </select>
+            <input id="browseArtist" type="text" list="browseArtistOptions" placeholder="Artist name" autocomplete="off" />
+            <input id="browseProducer" type="text" list="browseProducerOptions" placeholder="Producer name" autocomplete="off" />
+            <button id="browseGo">Browse</button>
+          </div>
+          <datalist id="browseArtistOptions"></datalist>
+          <datalist id="browseProducerOptions"></datalist>
+          <div class="hint">Pick a genre and/or type an artist or producer, then hit Browse. At least one filter is required.</div>
+        </div>
+      </div>
+
+      <div id="browseStatus" class="status"></div>
+
+      <div id="browseResultsSection" style="display:none;">
+        <div class="results-head">
+          <h2 id="browseResultsTitle">Results</h2>
+          <span id="browseResultsCount"></span>
+        </div>
+        <div class="cards" id="browseCards"></div>
+      </div>
     </div>
 
     <div id="recentPane" style="display:none;">
@@ -676,9 +754,11 @@
   const matchedRating = document.getElementById('matchedRating');
 
   const tabSearch = document.getElementById('tabSearch');
+  const tabBrowse = document.getElementById('tabBrowse');
   const tabRecent = document.getElementById('tabRecent');
   const tabStats = document.getElementById('tabStats');
   const searchPane = document.getElementById('searchPane');
+  const browsePane = document.getElementById('browsePane');
   const recentPane = document.getElementById('recentPane');
   const statsPane = document.getElementById('statsPane');
   const recentStatus = document.getElementById('recentStatus');
@@ -687,6 +767,19 @@
   const statsContent = document.getElementById('statsContent');
   let recentLoaded = false;
   let statsLoaded = false;
+
+  const browseTag = document.getElementById('browseTag');
+  const browseArtist = document.getElementById('browseArtist');
+  const browseProducer = document.getElementById('browseProducer');
+  const browseGoBtn = document.getElementById('browseGo');
+  const browseArtistOptions = document.getElementById('browseArtistOptions');
+  const browseProducerOptions = document.getElementById('browseProducerOptions');
+  const browseStatus = document.getElementById('browseStatus');
+  const browseResultsSection = document.getElementById('browseResultsSection');
+  const browseResultsTitle = document.getElementById('browseResultsTitle');
+  const browseResultsCount = document.getElementById('browseResultsCount');
+  const browseCardsEl = document.getElementById('browseCards');
+  let facetsLoaded = false;
 
   let allAlbums = [];      // [{title, artist_names}]
   let titlesLoaded = false;
@@ -895,17 +988,124 @@
 
   function switchTab(tab) {
     tabSearch.classList.toggle('active', tab === 'search');
+    tabBrowse.classList.toggle('active', tab === 'browse');
     tabRecent.classList.toggle('active', tab === 'recent');
     tabStats.classList.toggle('active', tab === 'stats');
     searchPane.style.display = tab === 'search' ? 'block' : 'none';
+    browsePane.style.display = tab === 'browse' ? 'block' : 'none';
     recentPane.style.display = tab === 'recent' ? 'block' : 'none';
     statsPane.style.display = tab === 'stats' ? 'block' : 'none';
+    if (tab === 'browse' && !facetsLoaded) loadFacets();
     if (tab === 'recent' && !recentLoaded) loadRecent();
     if (tab === 'stats' && !statsLoaded) loadStats();
   }
   tabSearch.addEventListener('click', () => switchTab('search'));
+  tabBrowse.addEventListener('click', () => switchTab('browse'));
   tabRecent.addEventListener('click', () => switchTab('recent'));
   tabStats.addEventListener('click', () => switchTab('stats'));
+
+  function setBrowseStatus(msg, isError = false) {
+    browseStatus.style.display = msg ? 'block' : 'none';
+    browseStatus.textContent = msg || '';
+    browseStatus.classList.toggle('error', isError);
+  }
+
+  async function loadFacets(attempt = 1) {
+    if (API_BASE.includes('your-backend')) {
+      setBrowseStatus('Backend URL not set yet — edit API_BASE at the top of the <script> tag in index.html.', true);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/facets`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      facetsLoaded = true;
+
+      browseTag.innerHTML = '<option value="">All genres/tags</option>' +
+        (data.tags || []).map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+      browseArtistOptions.innerHTML = (data.artists || []).map(a => `<option value="${escapeHtml(a)}"></option>`).join('');
+      browseProducerOptions.innerHTML = (data.producers || []).map(p => `<option value="${escapeHtml(p)}"></option>`).join('');
+    } catch (e) {
+      console.error('Could not load browse facets', e);
+      if (attempt < 4) {
+        setTimeout(() => loadFacets(attempt + 1), attempt * 4000);
+      } else {
+        setBrowseStatus('Could not reach the backend to load genres/artists/producers. Try again shortly.', true);
+      }
+    }
+  }
+
+  async function doBrowse() {
+    const tag = browseTag.value.trim();
+    const artist = browseArtist.value.trim();
+    const producer = browseProducer.value.trim();
+
+    if (!tag && !artist && !producer) {
+      setBrowseStatus('Pick a genre and/or type an artist or producer first.', true);
+      browseResultsSection.style.display = 'none';
+      return;
+    }
+
+    setBrowseStatus('Searching…');
+    browseResultsSection.style.display = 'none';
+
+    const params = new URLSearchParams();
+    if (tag) params.set('tag', tag);
+    if (artist) params.set('artist', artist);
+    if (producer) params.set('producer', producer);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/browse?${params.toString()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      if (!data.albums || !data.albums.length) {
+        setBrowseStatus('No albums match that combination.');
+        return;
+      }
+
+      setBrowseStatus('');
+      renderBrowseResults(data);
+    } catch (e) {
+      console.error('Browse request failed', e);
+      setBrowseStatus('Could not reach the backend. Try again shortly.', true);
+    }
+  }
+  browseGoBtn.addEventListener('click', doBrowse);
+  [browseArtist, browseProducer].forEach(el => {
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') doBrowse(); });
+  });
+  browseTag.addEventListener('change', doBrowse);
+
+  function renderBrowseResults(data) {
+    const parts = [];
+    if (data.tag) parts.push(`tag "${data.tag}"`);
+    if (data.artist) parts.push(`artist "${data.artist}"`);
+    if (data.producer) parts.push(`producer "${data.producer}"`);
+    browseResultsTitle.textContent = `Browsing by ${parts.join(', ')}`;
+    browseResultsCount.textContent = data.total > data.albums.length
+      ? `${data.albums.length} of ${data.total} matches shown`
+      : `${data.albums.length} match${data.albums.length === 1 ? '' : 'es'}`;
+
+    browseCardsEl.innerHTML = data.albums.map((r, i) => `
+      <div class="card" style="animation-delay:${i * 60}ms">
+        <div class="card-index">No. ${String(i + 1).padStart(2, '0')}</div>
+        <div class="cover ${r.cover_url ? '' : 'placeholder'}">
+          ${r.cover_url ? `<img src="${r.cover_url}" alt="${escapeHtml(r.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.remove();" />` : sleeveSvg()}
+        </div>
+        <h3>${escapeHtml(r.title)}</h3>
+        <div class="artist">${escapeHtml(r.artist_names || 'Unknown artist')}</div>
+        <div class="meta-row">
+          <span>${r.release_year || '—'}</span>
+          <span>${r.rating ? 'My rating: ' + r.rating : ''}</span>
+        </div>
+        <div class="tags">
+          ${(r.tags || []).slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
+        </div>
+      </div>
+    `).join('');
+    browseResultsSection.style.display = 'block';
+  }
 
   function setRecentStatus(msg, isError = false) {
     recentStatus.style.display = msg ? 'block' : 'none';
@@ -1043,7 +1243,12 @@
       </div>
     `;
 
-    const maxQuality = Math.max(...data.top_genres_by_quality.map(g => g.weighted_score), 1);
+    // weighted_score (like avg_rating) lives on the same fixed 1-10 scale as
+    // every other rating in the app, so its bar is scaled against a fixed
+    // 10 rather than the tightest top-10's own max — otherwise a real range
+    // of, say, 6.9-7.2 all render as ~full bars and look nearly identical
+    // in "goodness" when they're actually barely above average. album_count
+    // has no such fixed ceiling, so it keeps the relative maxFreq scaling.
     const maxFreq = Math.max(...data.top_genres_by_frequency.map(g => g.album_count), 1);
     const genresSection = `
       <div class="stats-section">
@@ -1051,7 +1256,7 @@
         <div class="stats-columns">
           <div>
             <div class="eyebrow-small" style="margin-bottom:8px;">Highest rated (weighted)</div>
-            ${barRows(data.top_genres_by_quality, 'tag', 'weighted_score', maxQuality, v => v.toFixed(1)) || '<div class="rank-row"><span class="rank-name">No tagged, rated albums yet.</span></div>'}
+            ${barRows(data.top_genres_by_quality, 'tag', 'weighted_score', 10, v => v.toFixed(1)) || '<div class="rank-row"><span class="rank-name">No tagged, rated albums yet.</span></div>'}
           </div>
           <div>
             <div class="eyebrow-small" style="margin-bottom:8px;">Most common</div>
@@ -1081,15 +1286,14 @@
       </div>
     `;
 
-    const maxDecade = Math.max(...data.ratings_by_decade.map(d => d.album_count), 1);
     const decadeSection = data.ratings_by_decade.length ? `
       <div class="stats-section">
         <h3>Ratings by Decade</h3>
         ${data.ratings_by_decade.map(d => `
           <div class="bar-row">
             <div class="bar-label">${escapeHtml(d.decade)}</div>
-            <div class="bar-track"><div class="bar-fill" style="width:${Math.max(4, (d.album_count / maxDecade) * 100)}%"></div></div>
-            <div class="bar-value">${d.avg_rating ?? '—'}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${Math.max(4, ((d.avg_rating ?? 0) / 10) * 100)}%"></div></div>
+            <div class="bar-value bar-value--decade">${d.avg_rating ?? '—'}<span class="bar-count"> (${d.album_count})</span></div>
           </div>
         `).join('')}
       </div>

@@ -153,14 +153,20 @@ def fetch_data() -> pd.DataFrame:
     # Producers are collected during ingestion but were previously unused by
     # the recommender. Two albums by different artists but the same producer
     # is often a genuinely useful "sounds/feels similar" signal — catches
-    # style similarity that pure genre tags miss.
+    # style similarity that pure genre tags miss. Names (not just mbids) are
+    # pulled too so /api/browse and /api/facets can offer "search by
+    # producer" the same way they do for tags and artists.
     producers_data = paginate(
         lambda: supabase.table("album_contributions")
-        .select("album_id, artists(mbid)")
+        .select("album_id, artists(mbid, name)")
         .eq("role", "producer")
     )
     producer_rows = [
-        {"album_id": r["album_id"], "producer_mbid": r["artists"]["mbid"]}
+        {
+            "album_id": r["album_id"],
+            "producer_mbid": r["artists"]["mbid"],
+            "producer_name": r["artists"].get("name"),
+        }
         for r in producers_data
         if r.get("artists") and r["artists"].get("mbid")
     ]
@@ -172,18 +178,29 @@ def fetch_data() -> pd.DataFrame:
         .rename(columns={"producer_mbid": "producer_mbids"})
         if producer_rows else pd.DataFrame(columns=["album_id", "producer_mbids"])
     )
+    producer_names_df = (
+        pd.DataFrame(producer_rows)
+        .dropna(subset=["producer_name"])
+        .groupby("album_id")["producer_name"]
+        .apply(list)
+        .reset_index()
+        .rename(columns={"producer_name": "producer_names"})
+        if producer_rows else pd.DataFrame(columns=["album_id", "producer_names"])
+    )
 
     df = albums_df.merge(tags_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
     df = df.merge(artists_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
     df = df.merge(artist_names_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
     df = df.merge(artist_credits_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
     df = df.merge(producers_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
+    df = df.merge(producer_names_df, left_on="id", right_on="album_id", how="left").drop(columns="album_id", errors="ignore")
 
     df["tags"] = df["tags"].apply(lambda x: x if isinstance(x, list) else [])
     df["artist_mbids"] = df["artist_mbids"].apply(lambda x: x if isinstance(x, list) else [])
     df["artist_names"] = df["artist_names"].fillna("Unknown artist")
     df["artist_credits"] = df["artist_credits"].apply(lambda x: x if isinstance(x, list) else [])
     df["producer_mbids"] = df["producer_mbids"].apply(lambda x: x if isinstance(x, list) else [])
+    df["producer_names"] = df["producer_names"].apply(lambda x: x if isinstance(x, list) else [])
 
     # Defensive strip: some titles were stored with stray leading/trailing
     # whitespace (fixed at the ingestion source now, but this covers rows
@@ -378,6 +395,32 @@ class StatsResponse(BaseModel):
     ratings_by_decade: list[DecadeStat] = []
 
 
+class FacetsResponse(BaseModel):
+    """Distinct tag / artist / producer names currently in the library, for
+    populating the Browse tab's filter controls (issue #3: search by
+    Genre/Tag/Artist/Producer instead of only exact-title search)."""
+    tags: list[str] = []
+    artists: list[str] = []
+    producers: list[str] = []
+
+
+class BrowseAlbum(BaseModel):
+    title: str
+    artist_names: str
+    release_year: Optional[str] = None
+    rating: Optional[float] = None
+    tags: list[str] = []
+    cover_url: Optional[str] = None
+
+
+class BrowseResponse(BaseModel):
+    tag: Optional[str] = None
+    artist: Optional[str] = None
+    producer: Optional[str] = None
+    total: int = 0
+    albums: list[BrowseAlbum] = []
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -418,6 +461,92 @@ def list_albums():
             for _, r in dedup.iterrows()
         ],
     )
+
+
+@app.get("/api/facets", response_model=FacetsResponse)
+def facets():
+    """Every distinct tag, artist, and producer name in the library — lets
+    the Browse tab populate its filter controls without the frontend having
+    to guess at what's available."""
+    df, _ = get_cache()
+
+    tags = sorted({t for tag_list in df["tags"] for t in tag_list})
+
+    artist_names = set()
+    for credits in df["artist_credits"]:
+        for c in credits:
+            name = c.get("name")
+            if name:
+                artist_names.add(name)
+
+    producer_names = {name for names in df["producer_names"] for name in names}
+
+    return FacetsResponse(
+        tags=tags,
+        artists=sorted(artist_names),
+        producers=sorted(producer_names),
+    )
+
+
+@app.get("/api/browse", response_model=BrowseResponse)
+def browse(
+    tag: Optional[str] = None,
+    artist: Optional[str] = None,
+    producer: Optional[str] = None,
+    n: int = 60,
+):
+    """Browse the library by genre/tag, artist, or producer instead of only
+    by exact title (issue #3). Filters combine with AND when more than one
+    is given. tag matches exactly (case-insensitive) against the controlled
+    tag vocabulary from /api/facets; artist/producer match as a
+    case-insensitive substring, same as /api/recommend's artist narrowing."""
+    if not (tag or artist or producer):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least one of tag, artist, or producer.",
+        )
+
+    df, _ = get_cache()
+    working = df
+
+    if tag:
+        tag_query = tag.strip().lower()
+        working = working[
+            working["tags"].apply(lambda ts: tag_query in {t.lower() for t in ts})
+        ]
+
+    if artist:
+        artist_query = artist.strip().lower()
+        working = working[
+            working["artist_names"].str.lower().str.contains(artist_query, na=False, regex=False)
+        ]
+
+    if producer:
+        producer_query = producer.strip().lower()
+        working = working[
+            working["producer_names"].apply(
+                lambda names: any(producer_query in p.lower() for p in names)
+            )
+        ]
+
+    total = len(working)
+    working = working.sort_values(
+        "rating", ascending=False, na_position="last"
+    ).head(min(max(n, 1), 200))
+
+    albums = [
+        BrowseAlbum(
+            title=row["title"],
+            artist_names=row.get("artist_names", "Unknown artist"),
+            release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
+            rating=float(row["rating"]) if pd.notna(row["rating"]) else None,
+            tags=row["tags"],
+            cover_url=cover_art_url(row.get("mbid")),
+        )
+        for _, row in working.iterrows()
+    ]
+
+    return BrowseResponse(tag=tag, artist=artist, producer=producer, total=total, albums=albums)
 
 
 @app.get("/api/recommend", response_model=RecommendResponse)
