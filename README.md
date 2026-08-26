@@ -1,5 +1,7 @@
 # Album Recommendations — public app
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+
 Wraps your existing Supabase-backed recommender (feature matrix + cosine
 similarity) in a small FastAPI service, with a static frontend styled as a
 library card catalog. Two independent pieces:
