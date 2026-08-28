@@ -932,11 +932,14 @@
     matchedTitle.textContent = album.title;
     matchedArtist.textContent = album.artist_names || 'Unknown artist';
     matchedYear.textContent = album.release_year || '—';
-    matchedRating.textContent = album.rating ? 'My rating: ' + album.rating : '';
+    // Leading separator (not just relying on the flex gap) so the year and
+    // rating never read as one run-on word — e.g. "2021My rating: 10" —
+    // when the text is selected/copied out of the page (issue #15).
+    matchedRating.textContent = album.rating ? '· My rating: ' + album.rating : '';
 
     matchedCover.classList.remove('placeholder');
     if (album.cover_url) {
-      matchedCover.innerHTML = `<img src="${album.cover_url}" alt="${escapeHtml(album.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.remove();" />`;
+      matchedCover.innerHTML = `<img src="${album.cover_url}" alt="${escapeHtml(album.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.parentElement.innerHTML = sleeveSvg();" />`;
     } else {
       matchedCover.classList.add('placeholder');
       matchedCover.innerHTML = sleeveSvg();
@@ -952,14 +955,14 @@
       <div class="card" style="animation-delay:${i * 60}ms">
         <div class="card-index">No. ${String(i + 1).padStart(2, '0')}</div>
         <div class="cover ${r.cover_url ? '' : 'placeholder'}">
-          ${r.cover_url ? `<img src="${r.cover_url}" alt="${escapeHtml(r.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.remove();" />` : sleeveSvg()}
+          ${r.cover_url ? `<img src="${r.cover_url}" alt="${escapeHtml(r.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.parentElement.innerHTML = sleeveSvg();" />` : sleeveSvg()}
           <div class="stamp">${Math.round(r.similarity * 100)}% match</div>
         </div>
         <h3>${escapeHtml(r.title)}</h3>
         <div class="artist">${escapeHtml(r.artist_names || 'Unknown artist')}</div>
         <div class="meta-row">
           <span>${r.release_year || '—'}</span>
-          <span>${r.rating ? 'My rating: ' + r.rating : ''}</span>
+          <span>${r.rating ? '· My rating: ' + r.rating : ''}</span>
         </div>
         <div class="tags">
           ${(r.tags || []).slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
@@ -1091,13 +1094,13 @@
       <div class="card" style="animation-delay:${i * 60}ms">
         <div class="card-index">No. ${String(i + 1).padStart(2, '0')}</div>
         <div class="cover ${r.cover_url ? '' : 'placeholder'}">
-          ${r.cover_url ? `<img src="${r.cover_url}" alt="${escapeHtml(r.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.remove();" />` : sleeveSvg()}
+          ${r.cover_url ? `<img src="${r.cover_url}" alt="${escapeHtml(r.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.parentElement.innerHTML = sleeveSvg();" />` : sleeveSvg()}
         </div>
         <h3>${escapeHtml(r.title)}</h3>
         <div class="artist">${escapeHtml(r.artist_names || 'Unknown artist')}</div>
         <div class="meta-row">
           <span>${r.release_year || '—'}</span>
-          <span>${r.rating ? 'My rating: ' + r.rating : ''}</span>
+          <span>${r.rating ? '· My rating: ' + r.rating : ''}</span>
         </div>
         <div class="tags">
           ${(r.tags || []).slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
@@ -1151,7 +1154,7 @@
     recentList.innerHTML = albums.map(a => `
       <div class="recent-row">
         <div class="cover ${a.cover_url ? '' : 'placeholder'}">
-          ${a.cover_url ? `<img src="${a.cover_url}" alt="${escapeHtml(a.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.remove();" />` : sleeveSvg()}
+          ${a.cover_url ? `<img src="${a.cover_url}" alt="${escapeHtml(a.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.parentElement.innerHTML = sleeveSvg();" />` : sleeveSvg()}
         </div>
         <div class="recent-info">
           <h4>${escapeHtml(a.title)}</h4>
