@@ -90,7 +90,8 @@ def fetch_data() -> pd.DataFrame:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     albums_data = paginate(lambda: supabase.table("albums").select(
-        "id, title, mbid, release_year, avg_length, rating, notion_created_at, notion_edited_at"
+        "id, title, mbid, release_year, avg_length, rating, notion_created_at, notion_edited_at, "
+        "spotify_album_id, spotify_cover_url"
     ))
     albums_df = pd.DataFrame(albums_data)
 
@@ -284,6 +285,23 @@ def cover_art_url(mbid: Optional[str]) -> Optional[str]:
     return f"https://coverartarchive.org/release-group/{mbid}/front-500"
 
 
+def resolve_cover_url(row) -> Optional[str]:
+    """Prefer the ingestion-precomputed Spotify fallback (issue #11) — set
+    only when Cover Art Archive was probed at ingestion time and found to
+    404 for this mbid — over the live-constructed CAA URL. Keeps this
+    backend from ever needing its own Spotify credentials or a live API
+    call on the request path; the ingestion pipeline already did the work."""
+    return row.get("spotify_cover_url") or cover_art_url(row.get("mbid"))
+
+
+def spotify_embed_url(row) -> Optional[str]:
+    """Issue #12: the frontend embeds this directly (an <iframe> with no
+    API key needed) to play an in-app preview. None when this album has no
+    Spotify match on file — the frontend falls back to no preview."""
+    album_id = row.get("spotify_album_id")
+    return f"https://open.spotify.com/embed/album/{album_id}" if album_id else None
+
+
 class Recommendation(BaseModel):
     title: str
     artist_names: str
@@ -293,6 +311,7 @@ class Recommendation(BaseModel):
     tags: list[str] = []
     similarity: float
     cover_url: Optional[str] = None
+    spotify_embed_url: Optional[str] = None
 
 
 class MatchedAlbum(BaseModel):
@@ -304,6 +323,7 @@ class MatchedAlbum(BaseModel):
     rating: Optional[float] = None
     tags: list[str] = []
     cover_url: Optional[str] = None
+    spotify_embed_url: Optional[str] = None
 
 
 class TitleMatch(BaseModel):
@@ -333,6 +353,7 @@ class RecentAlbum(BaseModel):
     rating: Optional[float] = None
     tags: list[str] = []
     cover_url: Optional[str] = None
+    spotify_embed_url: Optional[str] = None
     added_at: Optional[str] = None
     edited: bool = False
     edited_at: Optional[str] = None
@@ -411,6 +432,7 @@ class BrowseAlbum(BaseModel):
     rating: Optional[float] = None
     tags: list[str] = []
     cover_url: Optional[str] = None
+    spotify_embed_url: Optional[str] = None
 
 
 class BrowseResponse(BaseModel):
@@ -541,7 +563,8 @@ def browse(
             release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
             rating=float(row["rating"]) if pd.notna(row["rating"]) else None,
             tags=row["tags"],
-            cover_url=cover_art_url(row.get("mbid")),
+            cover_url=resolve_cover_url(row),
+            spotify_embed_url=spotify_embed_url(row),
         )
         for _, row in working.iterrows()
     ]
@@ -585,7 +608,8 @@ def recommend(title: str, n: int = 5, artist: Optional[str] = None):
         release_year=str(matched_row["release_year"]) if pd.notna(matched_row["release_year"]) else None,
         rating=float(matched_row["rating"]) if pd.notna(matched_row["rating"]) else None,
         tags=matched_row["tags"],
-        cover_url=cover_art_url(matched_row.get("mbid")),
+        cover_url=resolve_cover_url(matched_row),
+        spotify_embed_url=spotify_embed_url(matched_row),
     )
 
     sim_scores = cosine_similarity([feature_matrix[idx]], feature_matrix)[0]
@@ -625,7 +649,8 @@ def recommend(title: str, n: int = 5, artist: Optional[str] = None):
             rating=float(row["rating"]) if pd.notna(row["rating"]) else None,
             tags=row["tags"],
             similarity=round(float(row["similarity"]), 3),
-            cover_url=cover_art_url(row.get("mbid")),
+            cover_url=resolve_cover_url(row),
+            spotify_embed_url=spotify_embed_url(row),
         )
         for _, row in results.iterrows()
     ]
@@ -668,7 +693,8 @@ def recent():
             release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
             rating=float(row["rating"]) if pd.notna(row["rating"]) else None,
             tags=row["tags"],
-            cover_url=cover_art_url(row.get("mbid")),
+            cover_url=resolve_cover_url(row),
+            spotify_embed_url=spotify_embed_url(row),
             added_at=created.isoformat() if pd.notna(created) else None,
             edited=edited,
             edited_at=updated.isoformat() if edited else None,
@@ -718,7 +744,7 @@ def stats():
             artist_names=row.get("artist_names", "Unknown artist"),
             rating=float(row["rating"]),
             release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
-            cover_url=cover_art_url(row.get("mbid")),
+            cover_url=resolve_cover_url(row),
         )
         for _, row in top_albums_df.iterrows()
     ]

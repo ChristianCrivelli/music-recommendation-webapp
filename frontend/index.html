@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>The Catalog — Album Recommendations</title>
+<!-- Favicon: same vinyl-record motif as the cover-art placeholder (sleeveSvg() below), on a
+     rounded tile in the app's paper-green so it reads at tab size (#5). -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='16' fill='%239CB080'/%3E%3Ccircle cx='50' cy='50' r='42' fill='%23273338'/%3E%3Ccircle cx='50' cy='50' r='42' fill='none' stroke='%23F8FAF3' stroke-width='1.5' opacity='0.55'/%3E%3Ccircle cx='50' cy='50' r='30' fill='none' stroke='%23F8FAF3' stroke-width='1' opacity='0.4'/%3E%3Ccircle cx='50' cy='50' r='18' fill='none' stroke='%23F8FAF3' stroke-width='1' opacity='0.4'/%3E%3Ccircle cx='50' cy='50' r='7' fill='%23F8FAF3'/%3E%3Ccircle cx='50' cy='50' r='2' fill='%23273338'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -625,6 +628,36 @@
     opacity: 0.85;
   }
 
+  /* Issue #12: in-app preview toggle, shown only on albums with a resolved
+     Spotify match (spotify_embed_url). The iframe itself is only created
+     once the button is clicked, so pages with dozens of cards never load
+     more than the previews someone actually opens. */
+  .preview-toggle {
+    display: inline-block;
+    margin-top: 10px;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--stamp);
+    background: var(--stamp-soft);
+    border: 1px solid var(--stamp);
+    padding: 4px 10px;
+    border-radius: 20px;
+    cursor: pointer;
+  }
+  .preview-toggle:hover { opacity: 0.85; }
+  .preview-frame:not([hidden]) {
+    margin-top: 10px;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .preview-frame iframe {
+    display: block;
+    width: 100%;
+    border: none;
+  }
+
   footer {
     text-align: center;
     margin-top: 70px;
@@ -672,6 +705,7 @@
         <h3 id="matchedTitle"></h3>
         <div class="artist" id="matchedArtist"></div>
         <div class="meta-row"><span id="matchedYear"></span><span id="matchedRating"></span></div>
+        <div id="matchedPreview"></div>
       </div>
     </div>
 
@@ -752,6 +786,7 @@
   const matchedArtist = document.getElementById('matchedArtist');
   const matchedYear = document.getElementById('matchedYear');
   const matchedRating = document.getElementById('matchedRating');
+  const matchedPreview = document.getElementById('matchedPreview');
 
   const tabSearch = document.getElementById('tabSearch');
   const tabBrowse = document.getElementById('tabBrowse');
@@ -945,6 +980,8 @@
       matchedCover.innerHTML = sleeveSvg();
     }
 
+    matchedPreview.innerHTML = previewToggleHtml(album.spotify_embed_url);
+
     matchedEl.classList.add('open');
   }
 
@@ -967,10 +1004,42 @@
         <div class="tags">
           ${(r.tags || []).slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
+        ${previewToggleHtml(r.spotify_embed_url)}
       </div>
     `).join('');
     resultsSection.style.display = 'block';
   }
+
+  // Issue #12: renders the preview toggle + (initially empty, hidden)
+  // frame for one album card. Returns '' when the album has no resolved
+  // Spotify match, so the button simply doesn't appear.
+  function previewToggleHtml(embedUrl) {
+    if (!embedUrl) return '';
+    return `<button type="button" class="preview-toggle" data-embed="${escapeHtml(embedUrl)}">▶ Preview</button><div class="preview-frame" hidden></div>`;
+  }
+
+  // One delegated listener handles every preview button on the page,
+  // including ones rendered after this runs (search results, browse
+  // cards, recent rows) — no per-card listener wiring needed. The iframe
+  // is only created the first time a given button is opened.
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.preview-toggle');
+    if (!btn) return;
+    const frame = btn.nextElementSibling;
+    if (!frame || !frame.classList.contains('preview-frame')) return;
+
+    if (!frame.hidden) {
+      frame.hidden = true;
+      frame.innerHTML = '';
+      btn.textContent = '▶ Preview';
+      return;
+    }
+    frame.hidden = false;
+    if (!frame.innerHTML) {
+      frame.innerHTML = `<iframe src="${btn.getAttribute('data-embed')}" height="80" loading="lazy" allow="encrypted-media" title="Spotify preview"></iframe>`;
+    }
+    btn.textContent = '✕ Hide preview';
+  });
 
   function sleeveSvg() {
     return `<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1105,6 +1174,7 @@
         <div class="tags">
           ${(r.tags || []).slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
+        ${previewToggleHtml(r.spotify_embed_url)}
       </div>
     `).join('');
     browseResultsSection.style.display = 'block';
@@ -1159,6 +1229,7 @@
         <div class="recent-info">
           <h4>${escapeHtml(a.title)}</h4>
           <div class="artist">${escapeHtml(a.artist_names || 'Unknown artist')}${a.rating ? ' · My rating: ' + a.rating : ''}</div>
+          ${previewToggleHtml(a.spotify_embed_url)}
         </div>
         <span class="recent-badge ${a.edited ? 'edited' : 'added'}">${a.edited ? 'Edited' : 'Added'}</span>
         <span class="recent-date">${formatDate(a.edited ? a.edited_at : a.added_at)}</span>
