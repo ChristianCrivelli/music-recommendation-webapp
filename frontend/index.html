@@ -674,9 +674,13 @@
 <body>
   <div class="wrap">
     <header>
-      <div class="eyebrow">A Personal Library, Cross&#8209;Referenced</div>
+      <!-- Issue #14 re-marketing pass: leads with what the app does for you
+           (recommends) rather than what it is (a library/catalogue).
+           Keeping "The Catalog" as the name — this is a copy pass, not a
+           rebrand. -->
+      <div class="eyebrow">Built From My Own Ratings</div>
       <h1>The Catalog</h1>
-      <p>Type in an album you love.</p>
+      <p>Tell me an album you love — I'll find your next one.</p>
     </header>
 
     <div class="tabs">
@@ -692,7 +696,7 @@
       <div class="drawer-face">
         <div class="search-row">
           <input id="search" type="text" placeholder="e.g. Nah, I'm Good by BigBallerChris" autocomplete="off" />
-          <button id="go">Find similar albums!</button>
+          <button id="go">Find my next favorite album</button>
           <div id="suggest" class="suggest"></div>
         </div>
       </div>
@@ -701,10 +705,11 @@
     <div id="matched" class="matched">
       <div class="cover" id="matchedCover"></div>
       <div class="matched-info">
-        <div class="eyebrow-small">In your library</div>
+        <div class="eyebrow-small">Your starting point</div>
         <h3 id="matchedTitle"></h3>
         <div class="artist" id="matchedArtist"></div>
         <div class="meta-row"><span id="matchedYear"></span><span id="matchedRating"></span></div>
+        <div class="tags" id="matchedTags"></div>
         <div id="matchedPreview"></div>
       </div>
     </div>
@@ -713,7 +718,7 @@
 
     <div id="resultsSection" style="display:none;">
       <div class="results-head">
-        <h2 id="resultsTitle">Cross-references for &ndash;</h2>
+        <h2 id="resultsTitle">Because you love &ndash;</h2>
         <span id="resultsCount"></span>
       </div>
       <div class="cards" id="cards"></div>
@@ -746,6 +751,9 @@
           <span id="browseResultsCount"></span>
         </div>
         <div class="cards" id="browseCards"></div>
+        <div style="text-align:center; margin-top:24px;">
+          <button type="button" id="browseLoadMoreBtn" class="preview-toggle" style="display:none;">Load more</button>
+        </div>
       </div>
     </div>
 
@@ -787,6 +795,7 @@
   const matchedYear = document.getElementById('matchedYear');
   const matchedRating = document.getElementById('matchedRating');
   const matchedPreview = document.getElementById('matchedPreview');
+  const matchedTags = document.getElementById('matchedTags');
 
   const tabSearch = document.getElementById('tabSearch');
   const tabBrowse = document.getElementById('tabBrowse');
@@ -814,7 +823,15 @@
   const browseResultsTitle = document.getElementById('browseResultsTitle');
   const browseResultsCount = document.getElementById('browseResultsCount');
   const browseCardsEl = document.getElementById('browseCards');
+  const browseLoadMoreBtn = document.getElementById('browseLoadMoreBtn');
   let facetsLoaded = false;
+
+  // Issue #14 pagination fix: browse results used to hard-cap at 200 rows
+  // with no way to reach anything past that. These track the active
+  // filter set and how far paged in, so "Load more" can re-request the
+  // next page with the same tag/artist/producer instead of starting over.
+  let browseParams = null;
+  let browseOffset = 0;
 
   let allAlbums = [];      // [{title, artist_names}]
   let titlesLoaded = false;
@@ -971,6 +988,10 @@
     // rating never read as one run-on word — e.g. "2021My rating: 10" —
     // when the text is selected/copied out of the page (issue #15).
     matchedRating.textContent = album.rating ? '· My rating: ' + album.rating : '';
+    // Issue #14: the matched view is the most prominent card on the page
+    // and previously showed no tags at all, even though the API always
+    // sent them.
+    matchedTags.innerHTML = (album.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
 
     matchedCover.classList.remove('placeholder');
     if (album.cover_url) {
@@ -986,7 +1007,7 @@
   }
 
   function renderResults(data) {
-    resultsTitle.textContent = `Cross-references for "${data.matched_title}"`;
+    resultsTitle.textContent = `Because you love "${data.matched_title}"`;
     resultsCount.textContent = `${data.results.length} matches`;
     cardsEl.innerHTML = data.results.map((r, i) => `
       <div class="card" style="animation-delay:${i * 60}ms">
@@ -1002,7 +1023,7 @@
           <span>${r.rating ? '· My rating: ' + r.rating : ''}</span>
         </div>
         <div class="tags">
-          ${(r.tags || []).slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
+          ${(r.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
         ${previewToggleHtml(r.spotify_embed_url)}
       </div>
@@ -1125,9 +1146,11 @@
     if (tag) params.set('tag', tag);
     if (artist) params.set('artist', artist);
     if (producer) params.set('producer', producer);
+    browseParams = params;
+    browseOffset = 0;
 
     try {
-      const res = await fetch(`${API_BASE}/api/browse?${params.toString()}`);
+      const res = await fetch(`${API_BASE}/api/browse?${params.toString()}&offset=0`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
@@ -1137,7 +1160,7 @@
       }
 
       setBrowseStatus('');
-      renderBrowseResults(data);
+      renderBrowseResults(data, false);
     } catch (e) {
       console.error('Browse request failed', e);
       setBrowseStatus('Could not reach the backend. Try again shortly.', true);
@@ -1149,19 +1172,44 @@
   });
   browseTag.addEventListener('change', doBrowse);
 
-  function renderBrowseResults(data) {
+  // Issue #14: "Load more" re-requests the same filters at the next
+  // offset and appends, rather than the old hard 200-row ceiling that
+  // left anything past it permanently unreachable.
+  async function loadMoreBrowse() {
+    if (!browseParams) return;
+    browseLoadMoreBtn.disabled = true;
+    browseLoadMoreBtn.textContent = 'Loading…';
+    try {
+      const res = await fetch(`${API_BASE}/api/browse?${browseParams.toString()}&offset=${browseOffset}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      renderBrowseResults(data, true);
+    } catch (e) {
+      console.error('Load more failed', e);
+      setBrowseStatus('Could not load more — try again shortly.', true);
+    } finally {
+      browseLoadMoreBtn.disabled = false;
+      browseLoadMoreBtn.textContent = 'Load more';
+    }
+  }
+  browseLoadMoreBtn.addEventListener('click', loadMoreBrowse);
+
+  function renderBrowseResults(data, append) {
     const parts = [];
     if (data.tag) parts.push(`tag "${data.tag}"`);
     if (data.artist) parts.push(`artist "${data.artist}"`);
     if (data.producer) parts.push(`producer "${data.producer}"`);
     browseResultsTitle.textContent = `Browsing by ${parts.join(', ')}`;
-    browseResultsCount.textContent = data.total > data.albums.length
-      ? `${data.albums.length} of ${data.total} matches shown`
-      : `${data.albums.length} match${data.albums.length === 1 ? '' : 'es'}`;
 
-    browseCardsEl.innerHTML = data.albums.map((r, i) => `
-      <div class="card" style="animation-delay:${i * 60}ms">
-        <div class="card-index">No. ${String(i + 1).padStart(2, '0')}</div>
+    browseOffset = (append ? browseOffset : 0) + data.albums.length;
+    browseResultsCount.textContent = data.total > browseOffset
+      ? `${browseOffset} of ${data.total} matches shown`
+      : `${data.total} match${data.total === 1 ? '' : 'es'}`;
+    browseLoadMoreBtn.style.display = data.has_more ? 'inline-block' : 'none';
+
+    const cardsHtml = data.albums.map((r, i) => `
+      <div class="card" style="animation-delay:${(i % 20) * 60}ms">
+        <div class="card-index">No. ${String((append ? browseOffset - data.albums.length : 0) + i + 1).padStart(2, '0')}</div>
         <div class="cover ${r.cover_url ? '' : 'placeholder'}">
           ${r.cover_url ? `<img src="${r.cover_url}" alt="${escapeHtml(r.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.parentElement.innerHTML = sleeveSvg();" />` : sleeveSvg()}
         </div>
@@ -1172,11 +1220,17 @@
           <span>${r.rating ? '· My rating: ' + r.rating : ''}</span>
         </div>
         <div class="tags">
-          ${(r.tags || []).slice(0, 5).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
+          ${(r.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
         ${previewToggleHtml(r.spotify_embed_url)}
       </div>
     `).join('');
+
+    if (append) {
+      browseCardsEl.insertAdjacentHTML('beforeend', cardsHtml);
+    } else {
+      browseCardsEl.innerHTML = cardsHtml;
+    }
     browseResultsSection.style.display = 'block';
   }
 
@@ -1229,6 +1283,7 @@
         <div class="recent-info">
           <h4>${escapeHtml(a.title)}</h4>
           <div class="artist">${escapeHtml(a.artist_names || 'Unknown artist')}${a.rating ? ' · My rating: ' + a.rating : ''}</div>
+          <div class="tags">${(a.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>
           ${previewToggleHtml(a.spotify_embed_url)}
         </div>
         <span class="recent-badge ${a.edited ? 'edited' : 'added'}">${a.edited ? 'Edited' : 'Added'}</span>

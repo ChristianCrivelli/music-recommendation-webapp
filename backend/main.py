@@ -440,6 +440,13 @@ class BrowseResponse(BaseModel):
     artist: Optional[str] = None
     producer: Optional[str] = None
     total: int = 0
+    offset: int = 0
+    # Issue #14's "pagination fix": previously the only way to see more of
+    # a large result set was raising `n` up to a hard 200-row ceiling —
+    # anything past that was permanently unreachable, no error, no signal.
+    # has_more tells the frontend whether a "Load more" fetch (same filters,
+    # offset advanced by however many rows came back) would return anything.
+    has_more: bool = False
     albums: list[BrowseAlbum] = []
 
 
@@ -516,12 +523,17 @@ def browse(
     artist: Optional[str] = None,
     producer: Optional[str] = None,
     n: int = 60,
+    offset: int = 0,
 ):
     """Browse the library by genre/tag, artist, or producer instead of only
     by exact title (issue #3). Filters combine with AND when more than one
     is given. tag matches exactly (case-insensitive) against the controlled
     tag vocabulary from /api/facets; artist/producer match as a
-    case-insensitive substring, same as /api/recommend's artist narrowing."""
+    case-insensitive substring, same as /api/recommend's artist narrowing.
+
+    Issue #14: `offset` pages through a result set larger than one page
+    (still capped at 200 rows per request) instead of `n` alone silently
+    truncating anything past its ceiling with no way to reach the rest."""
     if not (tag or artist or producer):
         raise HTTPException(
             status_code=400,
@@ -552,9 +564,11 @@ def browse(
         ]
 
     total = len(working)
-    working = working.sort_values(
-        "rating", ascending=False, na_position="last"
-    ).head(min(max(n, 1), 200))
+    working = working.sort_values("rating", ascending=False, na_position="last")
+
+    page_size = min(max(n, 1), 200)
+    offset = max(offset, 0)
+    page = working.iloc[offset:offset + page_size]
 
     albums = [
         BrowseAlbum(
@@ -566,10 +580,18 @@ def browse(
             cover_url=resolve_cover_url(row),
             spotify_embed_url=spotify_embed_url(row),
         )
-        for _, row in working.iterrows()
+        for _, row in page.iterrows()
     ]
 
-    return BrowseResponse(tag=tag, artist=artist, producer=producer, total=total, albums=albums)
+    return BrowseResponse(
+        tag=tag,
+        artist=artist,
+        producer=producer,
+        total=total,
+        offset=offset,
+        has_more=(offset + len(albums)) < total,
+        albums=albums,
+    )
 
 
 @app.get("/api/recommend", response_model=RecommendResponse)
