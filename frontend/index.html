@@ -658,6 +658,16 @@
     border: none;
   }
 
+  /* Issue #13: developer self-promo teaser in the footer, using the same
+     preview toggle as issue #12's album previews. */
+  .chris-teaser {
+    margin-top: 10px;
+    max-width: 320px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .chris-teaser .preview-frame:not([hidden]) { text-align: left; }
+
   footer {
     text-align: center;
     margin-top: 70px;
@@ -767,7 +777,10 @@
       <div id="statsContent"></div>
     </div>
 
-    <footer>Recommendations pulled live from a hand-curated album library.</footer>
+    <footer>
+      Recommendations pulled live from a hand-curated album library.
+      <div id="chrisTeaser" class="chris-teaser"></div>
+    </footer>
   </div>
 
 <script>
@@ -1431,7 +1444,33 @@
     statsContent.innerHTML = overview + albumsSection + artistsSection + genresSection + histogramSection + decadeSection;
   }
 
+  // Issue #13: a small self-promo teaser for the developer's own music,
+  // separate from #12's per-album previews. Picks one track at random
+  // each page load, per the issue's "song should change to any random
+  // BigBallerChris song" — clicking it plays the embed in-browser, same
+  // toggle pattern as #12, and hands off to Spotify from there.
+  // Album: "Nah, I'm Good" — https://open.spotify.com/album/2cqgDf24hCo9V3O4DQhPIg
+  const BIGBALLERCHRIS_TRACKS = [
+    '4dsD5RCvLSDpZgUyoZ6zOC', // Crime
+    '07C1STZXMra8rYT1aed79m', // Party Girl
+    '5ggI60F2MGI8j6CeL905m6', // Dribbling
+    '5Mjle5kJfwdNWwtBT4zq6M', // Breakfast
+    '5AxoFiG8N8OnSTiNRd5tkC', // Shawty_exe
+    '46n1RKDMgPiddIqW2wIrwp', // Troy & Abed
+    '7zxYSf7gJqziQDc1XwPSeJ', // Picassilly
+    '77KxiiUEVR9TWo2u0E7jkd', // Swordplay
+    '30CLjgkJ31l6n5jFZ5ajQ4', // Forest
+  ];
+
+  function renderChrisTeaser() {
+    const trackId = BIGBALLERCHRIS_TRACKS[Math.floor(Math.random() * BIGBALLERCHRIS_TRACKS.length)];
+    const embedUrl = `https://open.spotify.com/embed/track/${trackId}`;
+    document.getElementById('chrisTeaser').innerHTML =
+      `<span style="opacity:0.8;">A song by the developer:</span> ${previewToggleHtml(embedUrl)}`;
+  }
+
   loadTitles();
+  renderChrisTeaser();
 </script>
 </body>
 </html>
