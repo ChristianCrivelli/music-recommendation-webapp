@@ -42,6 +42,20 @@ async def runtime_error_handler(request, exc: RuntimeError):
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
+
+# Catch-all for anything not already handled above (e.g. a dependency-version
+# break in fetch_data()/build_feature_matrix()). Without this, an unhandled
+# exception surfaces to the client as a bare 500 with no detail, and the only
+# way to diagnose it is guessing — this at least logs the real traceback
+# server-side so it shows up in Render's log stream.
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request, exc: Exception):
+    import logging
+    import traceback
+    from fastapi.responses import JSONResponse
+    logging.error("Unhandled error on %s: %s", request.url.path, traceback.format_exc())
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_ORIGIN] if FRONTEND_ORIGIN != "*" else ["*"],
