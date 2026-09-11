@@ -130,13 +130,23 @@ def fetch_data() -> pd.DataFrame:
 
     artists_data = paginate(
         lambda: supabase.table("album_contributions")
-        .select("album_id, artists(mbid, name)")
+        .select("album_id, artists(id, mbid, name)")
         .eq("role", "artist")
     )
     artist_rows = [
         {
             "album_id": r["album_id"],
-            "artist_mbid": r["artists"]["mbid"],
+            # Manually-entered artists (see manual_overrides / README's
+            # "fully manual entry" mode) can lack an mbid entirely. 60 of the
+            # 2053 artist-role contributions currently do. Falling back to
+            # the artist's own row id keeps every album's artist list free
+            # of None — mixing None into this column crashes
+            # MultiLabelBinarizer's internal sort in build_feature_matrix()
+            # (that's the "'<' not supported between instances of
+            # 'NoneType' and 'str'" 500 on every endpoint) — while still
+            # giving the recommender a stable, per-artist identifier so
+            # albums by the same mbid-less artist still cluster as a match.
+            "artist_mbid": r["artists"]["mbid"] or f"noMbid:{r['artists']['id']}",
             "artist_name": r["artists"]["name"],
         }
         for r in artists_data
