@@ -1046,8 +1046,16 @@
   // Issue #12: renders the preview toggle + (initially empty, hidden)
   // frame for one album card. Returns '' when the album has no resolved
   // Spotify match, so the button simply doesn't appear.
-  function previewToggleHtml(embedUrl) {
+  function previewToggleHtml(embedUrl, { expanded = false } = {}) {
     if (!embedUrl) return '';
+    // `expanded` renders the embed already open (iframe pre-built, "Hide
+    // preview" state) instead of collapsed behind the "▶ Preview" click -
+    // used for the developer teaser (#19) so it doesn't need an extra click
+    // to hear. data-embed stays on the button either way so the shared
+    // click handler below can still collapse/reopen it normally.
+    if (expanded) {
+      return `<button type="button" class="preview-toggle" data-embed="${escapeHtml(embedUrl)}">✕ Hide preview</button><div class="preview-frame"><iframe src="${escapeHtml(embedUrl)}" height="80" loading="lazy" allow="encrypted-media" title="Spotify preview"></iframe></div>`;
+    }
     return `<button type="button" class="preview-toggle" data-embed="${escapeHtml(embedUrl)}">▶ Preview</button><div class="preview-frame" hidden></div>`;
   }
 
@@ -1465,7 +1473,7 @@
     const trackId = BIGBALLERCHRIS_TRACKS[Math.floor(Math.random() * BIGBALLERCHRIS_TRACKS.length)];
     const embedUrl = `https://open.spotify.com/embed/track/${trackId}`;
     document.getElementById('chrisTeaser').innerHTML =
-      `<span style="opacity:0.8;">A song by the developer:</span> ${previewToggleHtml(embedUrl)}`;
+      `<span style="opacity:0.8;">A song by the developer:</span> ${previewToggleHtml(embedUrl, { expanded: true })}`;
   }
 
   loadTitles();

@@ -625,6 +625,19 @@ def recommend(title: str, n: int = 5, artist: Optional[str] = None):
     matches = df[df["title"].str.lower() == title.strip().lower()]
 
     if matches.empty:
+        # The query might be an artist's name rather than an album title (e.g.
+        # searching "Birdman" the person) - matching only against df["title"]
+        # otherwise falls straight through to difflib's close-title matches,
+        # which produces meaningless "Did you mean" suggestions for a query
+        # that was never a title to begin with (see issue #23). Try the
+        # artist column first, the same substring match /api/browse already
+        # uses for its artist filter.
+        query_lower = title.strip().lower()
+        artist_matches = df[df["artist_names"].str.lower().str.contains(query_lower, na=False, regex=False)]
+        if not artist_matches.empty:
+            artist_titles = artist_matches["title"].tolist()[:5]
+            return RecommendResponse(query=title, suggestions=artist_titles, results=[])
+
         close = difflib.get_close_matches(title, df["title"].tolist(), n=5, cutoff=0.4)
         return RecommendResponse(query=title, suggestions=close, results=[])
 
