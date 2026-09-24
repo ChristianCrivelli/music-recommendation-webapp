@@ -1,0 +1,24 @@
+name: Keep Backend Warm
+
+# Render's free tier spins the backend down after ~15 minutes with no
+# incoming traffic, so the first request afterward eats a ~45-60s cold
+# start (issue #25). Pinging the health endpoint every 10 minutes keeps
+# it inside that window so it never gets the chance to spin down during
+# normal hours. It'll still cold-start after long stretches with zero
+# GitHub Actions runs (Actions itself pauses schedules on repos with no
+# activity for 60 days), but that's not a case that comes up day-to-day.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # Allows triggering it manually from the GitHub website
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          curl -sS -o /dev/null -w "status=%{http_code} time=%{time_total}s\n" \
+            --max-time 90 \
+            https://album-recs-api.onrender.com/api/health
