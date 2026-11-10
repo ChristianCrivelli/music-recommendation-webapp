@@ -327,6 +327,7 @@ def spotify_embed_url(row) -> Optional[str]:
 
 
 class Recommendation(BaseModel):
+    id: str
     title: str
     artist_names: str
     release_year: Optional[str] = None
@@ -341,6 +342,7 @@ class Recommendation(BaseModel):
 class MatchedAlbum(BaseModel):
     """The album the person actually searched for — shown directly under the
     search bar, separately from the list of recommended cross-references."""
+    id: str
     title: str
     artist_names: str
     release_year: Optional[str] = None
@@ -371,6 +373,7 @@ class RecommendResponse(BaseModel):
 
 
 class RecentAlbum(BaseModel):
+    id: str
     title: str
     artist_names: str
     release_year: Optional[str] = None
@@ -450,6 +453,7 @@ class FacetsResponse(BaseModel):
 
 
 class BrowseAlbum(BaseModel):
+    id: str
     title: str
     artist_names: str
     release_year: Optional[str] = None
@@ -596,6 +600,7 @@ def browse(
 
     albums = [
         BrowseAlbum(
+            id=str(row["id"]),
             title=row["title"],
             artist_names=row.get("artist_names", "Unknown artist"),
             release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
@@ -662,6 +667,7 @@ def recommend(title: str, n: int = 5, artist: Optional[str] = None):
     idx = matches.index[0]
     matched_row = matches.iloc[0]
     matched_album = MatchedAlbum(
+        id=str(matched_row["id"]),
         title=matched_row["title"],
         artist_names=matched_row.get("artist_names", "Unknown artist"),
         release_year=str(matched_row["release_year"]) if pd.notna(matched_row["release_year"]) else None,
@@ -693,6 +699,23 @@ def recommend(title: str, n: int = 5, artist: Optional[str] = None):
     )
     results["similarity"] = results["similarity"] * confidence
 
+    # Same-artist discount (issue #6 follow-up): in the live library, the
+    # #1 recommendation is just "another album by the same artist" 69% of
+    # the time even among albums with real tag data — that's not a scoring
+    # bug (an artist's own catalog here genuinely tends to share tags), but
+    # it's low-value as a discovery feature since you've presumably already
+    # heard and rated the rest of that artist's work. 0.6 was picked
+    # empirically: it drops the same-artist-top-1 rate among tagged albums
+    # from 69% to 13% (letting real cross-artist matches win the close
+    # calls) while barely touching the untagged minority (90% -> still
+    # ~90%), where same-artist is correctly the only real signal available
+    # and a hard exclude would just replace it with noise. Soft rather than
+    # a hard exclude so a same-artist album can still win when it's
+    # genuinely the best match by a wide margin.
+    SAME_ARTIST_PENALTY = 0.6
+    same_artist = results["artist_mbids"].apply(lambda a: bool(set(matched_row["artist_mbids"]) & set(a)))
+    results.loc[same_artist, "similarity"] *= SAME_ARTIST_PENALTY
+
     results = (
         results[results.index != idx]
         .sort_values("similarity", ascending=False)
@@ -701,6 +724,7 @@ def recommend(title: str, n: int = 5, artist: Optional[str] = None):
 
     recs = [
         Recommendation(
+            id=str(row["id"]),
             title=row["title"],
             artist_names=row.get("artist_names", "Unknown artist"),
             release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
@@ -747,6 +771,7 @@ def recent():
         updated = row["updated_at"]
         edited = bool(pd.notna(created) and pd.notna(updated) and updated > created)
         albums.append(RecentAlbum(
+            id=str(row["id"]),
             title=row["title"],
             artist_names=row.get("artist_names", "Unknown artist"),
             release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
@@ -918,6 +943,241 @@ def stats():
         rating_distribution=rating_distribution,
         ratings_by_decade=ratings_by_decade,
     )
+
+
+class ExploreAlbum(BaseModel):
+    id: str
+    title: str
+    artist_names: str
+    release_year: Optional[str] = None
+    rating: Optional[float] = None
+    tags: list[str] = []
+    cover_url: Optional[str] = None
+    spotify_embed_url: Optional[str] = None
+
+
+class ExploreResponse(BaseModel):
+    albums: list[ExploreAlbum] = []
+
+
+EXPLORE_MIN_RATING = 8
+EXPLORE_DEFAULT_COUNT = 12
+
+
+@app.get("/api/explore", response_model=ExploreResponse)
+def explore(n: int = EXPLORE_DEFAULT_COUNT):
+    """Issue #24: a random pick of highly-rated albums — a low-effort way to
+    rediscover something already loved instead of always searching by title.
+
+    "Diverse-ish" (per the issue): caps how many albums from the same artist
+    or sharing the same single tag can land in one batch, so a prolific
+    favorite artist or the library's single dominant genre doesn't crowd out
+    everything else in what's supposed to feel like flipping through the
+    whole shelf rather than one corner of it. Caps are soft — if the
+    >=8-rated pool is too small or too concentrated to fill `n` under them,
+    the rest is backfilled uncapped rather than silently returning fewer
+    albums than asked for.
+    """
+    df, _ = get_cache()
+    pool = df[df["rating"].apply(lambda r: pd.notna(r) and float(r) >= EXPLORE_MIN_RATING)]
+    if pool.empty:
+        return ExploreResponse(albums=[])
+
+    n = min(max(n, 1), 50)
+    candidates = pool.sample(frac=1).to_dict("records")  # shuffle the pool
+
+    MAX_PER_ARTIST = 2
+    MAX_PER_TAG = max(2, n // 4)
+    artist_counts: dict = {}
+    tag_counts: dict = {}
+    picked = []
+
+    for row in candidates:
+        if len(picked) >= n:
+            break
+        artist_key = row.get("artist_names") or "Unknown artist"
+        if artist_counts.get(artist_key, 0) >= MAX_PER_ARTIST:
+            continue
+        row_tags = row.get("tags") or []
+        # Skip only when EVERY tag on this album is already at its cap — one
+        # still-open tag is enough to let it in.
+        if row_tags and all(tag_counts.get(t, 0) >= MAX_PER_TAG for t in row_tags):
+            continue
+        picked.append(row)
+        artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+        for t in row_tags:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+
+    if len(picked) < n:
+        picked_ids = {r["id"] for r in picked}
+        for row in candidates:
+            if len(picked) >= n:
+                break
+            if row["id"] not in picked_ids:
+                picked.append(row)
+
+    return ExploreResponse(albums=[
+        ExploreAlbum(
+            id=str(row["id"]),
+            title=row["title"],
+            artist_names=row.get("artist_names", "Unknown artist"),
+            release_year=str(row["release_year"]) if pd.notna(row["release_year"]) else None,
+            rating=float(row["rating"]) if pd.notna(row["rating"]) else None,
+            tags=row["tags"],
+            cover_url=resolve_cover_url(row),
+            spotify_embed_url=spotify_embed_url(row),
+        )
+        for row in picked
+    ])
+
+
+class AlbumRequestIn(BaseModel):
+    album_title: str
+    artist_name: str
+    note: Optional[str] = None
+    requester_contact: Optional[str] = None
+
+
+class AlbumRequestOut(BaseModel):
+    status: str = "ok"
+
+
+MAX_TITLE_LEN = 200
+MAX_ARTIST_LEN = 200
+MAX_NOTE_LEN = 1000
+MAX_CONTACT_LEN = 200
+
+
+@app.post("/api/request-album", response_model=AlbumRequestOut)
+def request_album(payload: AlbumRequestIn):
+    """Issue #20: let a site visitor ask for an album to be added.
+
+    Intake only — no notification system yet (the issue itself says that
+    part is "worth brainstorming"), this just gives a queue to read from
+    the Supabase table editor. The service is read-only everywhere else by
+    design (see the module docstring); this is the one deliberate
+    exception, and it's scoped tightly: album_requests is a brand-new
+    table holding nothing but visitor submissions, with an INSERT-only RLS
+    policy and no SELECT/UPDATE/DELETE policy at all, so this endpoint
+    still can't read or touch any real library data, and neither could
+    anyone else who got hold of this same key.
+    """
+    title = payload.album_title.strip()
+    artist = payload.artist_name.strip()
+    note = (payload.note or "").strip() or None
+    contact = (payload.requester_contact or "").strip() or None
+
+    if not title or not artist:
+        raise HTTPException(status_code=400, detail="album_title and artist_name are required")
+    if len(title) > MAX_TITLE_LEN or len(artist) > MAX_ARTIST_LEN:
+        raise HTTPException(status_code=400, detail="album_title/artist_name is too long")
+    if note and len(note) > MAX_NOTE_LEN:
+        raise HTTPException(status_code=400, detail="note is too long")
+    if contact and len(contact) > MAX_CONTACT_LEN:
+        raise HTTPException(status_code=400, detail="requester_contact is too long")
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are not set")
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    supabase.table("album_requests").insert({
+        "album_title": title,
+        "artist_name": artist,
+        "note": note,
+        "requester_contact": contact,
+    }).execute()
+
+    return AlbumRequestOut(status="ok")
+
+
+class RateAlbumIn(BaseModel):
+    album_id: str
+    rating: int
+    visitor_id: str
+
+
+class CommunityRating(BaseModel):
+    average: float
+    count: int
+
+
+class RateAlbumOut(BaseModel):
+    status: str = "ok"
+    community: CommunityRating
+
+
+MAX_VISITOR_ID_LEN = 100
+
+
+@app.post("/api/rate-album", response_model=RateAlbumOut)
+def rate_album(payload: RateAlbumIn):
+    """Phase 1 of the ratings roadmap: let a visitor say "I've listened to
+    this" with their own 1-10 rating. Upserts on (album_id, visitor_id) so
+    re-rating updates rather than duplicates. Deliberately NOT fed into
+    /api/recommend's scoring yet -- see the listener_ratings migration
+    comment. This only returns the updated community average so the
+    frontend can show it immediately.
+    """
+    visitor_id = payload.visitor_id.strip()
+    if not visitor_id or len(visitor_id) > MAX_VISITOR_ID_LEN:
+        raise HTTPException(status_code=400, detail="visitor_id is required and must be reasonably short")
+    if not (1 <= payload.rating <= 10):
+        raise HTTPException(status_code=400, detail="rating must be between 1 and 10")
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are not set")
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    try:
+        supabase.table("listener_ratings").upsert(
+            {
+                "album_id": payload.album_id,
+                "rating": payload.rating,
+                "visitor_id": visitor_id,
+                "updated_at": "now()",
+            },
+            on_conflict="album_id,visitor_id",
+        ).execute()
+    except Exception as e:
+        # Most likely a bad album_id (foreign key violation) rather than a
+        # server problem -- surface it as a client error, not a 500.
+        raise HTTPException(status_code=400, detail=f"Could not save rating: {e}")
+
+    resp = supabase.table("listener_ratings").select("rating").eq("album_id", payload.album_id).execute()
+    ratings = [r["rating"] for r in (resp.data or [])]
+    average = round(sum(ratings) / len(ratings), 2) if ratings else 0.0
+
+    return RateAlbumOut(community=CommunityRating(average=average, count=len(ratings)))
+
+
+class CommunityRatingsResponse(BaseModel):
+    ratings: dict[str, CommunityRating] = {}
+
+
+MAX_COMMUNITY_RATING_IDS = 100
+
+
+@app.get("/api/community-ratings", response_model=CommunityRatingsResponse)
+def community_ratings(ids: str):
+    """Batch lookup for the card grid: GET ?ids=uuid1,uuid2,... -> average
+    + count per album_id, omitting any album with zero ratings so the
+    frontend knows to hide the badge rather than show "0.0 (0)"."""
+    album_ids = [i.strip() for i in ids.split(",") if i.strip()][:MAX_COMMUNITY_RATING_IDS]
+    if not album_ids:
+        return CommunityRatingsResponse(ratings={})
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are not set")
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    resp = supabase.table("listener_ratings").select("album_id, rating").in_("album_id", album_ids).execute()
+    by_album: dict[str, list[int]] = {}
+    for row in (resp.data or []):
+        by_album.setdefault(row["album_id"], []).append(row["rating"])
+
+    return CommunityRatingsResponse(ratings={
+        album_id: CommunityRating(average=round(sum(vals) / len(vals), 2), count=len(vals))
+        for album_id, vals in by_album.items()
+    })
 
 
 @app.post("/api/refresh")

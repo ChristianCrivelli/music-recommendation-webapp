@@ -169,6 +169,100 @@
   button#browseGo:hover { transform: translateY(-1px); }
   button#browseGo:active { transform: translateY(0); }
 
+  button#exploreShuffleBtn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: var(--stamp);
+    color: #F8FAF3;
+    border: none;
+    padding: 10px 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+  }
+  button#exploreShuffleBtn:hover { transform: translateY(-1px); }
+  button#exploreShuffleBtn:active { transform: translateY(0); }
+  button#exploreShuffleBtn:disabled { opacity: 0.6; cursor: default; transform: none; }
+
+  .request-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 480px;
+  }
+  .request-form input,
+  .request-form textarea {
+    font-family: 'Fraunces', serif;
+    font-size: 15px;
+    padding: 10px 12px;
+    border: 1.5px solid var(--card-line);
+    background: #fff;
+    color: var(--ink);
+    border-radius: 4px;
+    outline: none;
+    resize: vertical;
+  }
+  .request-form input:focus,
+  .request-form textarea:focus { border-color: var(--accent); }
+  button#requestSubmitBtn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    background: var(--stamp);
+    color: #F8FAF3;
+    border: none;
+    padding: 10px 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+    align-self: flex-start;
+  }
+  button#requestSubmitBtn:hover { transform: translateY(-1px); }
+  button#requestSubmitBtn:active { transform: translateY(0); }
+  button#requestSubmitBtn:disabled { opacity: 0.6; cursor: default; transform: none; }
+
+  .community-rating {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    opacity: 0.75;
+    margin-top: 2px;
+  }
+  .rate-toggle {
+    background: none;
+    border: none;
+    color: var(--tab);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0;
+    margin-top: 2px;
+  }
+  .rate-toggle:hover { color: var(--stamp); }
+  .rate-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .rate-pick {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    width: 22px;
+    height: 22px;
+    border: 1.5px solid var(--card-line);
+    background: #fff;
+    color: var(--ink);
+    border-radius: 3px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .rate-pick:hover { border-color: var(--accent); }
+  .rate-pick.mine { background: var(--stamp); color: #F8FAF3; border-color: var(--stamp); }
+
   .suggest {
     position: absolute;
     top: calc(100% + 6px);
@@ -697,6 +791,8 @@
       <button class="tab-btn" id="tabBrowse" data-tab="browse">Browse</button>
       <button class="tab-btn" id="tabRecent" data-tab="recent">Recently Added</button>
       <button class="tab-btn" id="tabStats" data-tab="stats">Stats</button>
+      <button class="tab-btn" id="tabExplore" data-tab="explore">Explore</button>
+      <button class="tab-btn" id="tabRequest" data-tab="request">Request an Album</button>
     </div>
 
     <div id="searchPane">
@@ -776,6 +872,40 @@
       <div id="statsContent"></div>
     </div>
 
+    <div id="explorePane" style="display:none;">
+      <div class="drawer">
+        <div class="drawer-label">Explore</div>
+        <div class="drawer-face">
+          <div class="hint" style="margin-bottom:12px;">A random pick of my highest-rated albums — flip through the shelf instead of searching by title.</div>
+          <button id="exploreShuffleBtn">🔀 Shuffle</button>
+        </div>
+      </div>
+
+      <div id="exploreStatus" class="status"></div>
+
+      <div id="exploreResultsSection" style="display:none;">
+        <div class="cards" id="exploreCards"></div>
+      </div>
+    </div>
+
+    <div id="requestPane" style="display:none;">
+      <div class="drawer">
+        <div class="drawer-label">Request an Album</div>
+        <div class="drawer-face">
+          <div class="hint" style="margin-bottom:12px;">Don't see something you'd love to see on here? Ask and I'll take a look — no promises on timing, and there's no notification system yet, so this is just a one-way note to me.</div>
+          <form id="requestForm" class="request-form">
+            <input id="requestTitle" type="text" placeholder="Album title *" autocomplete="off" required />
+            <input id="requestArtist" type="text" placeholder="Artist *" autocomplete="off" required />
+            <textarea id="requestNote" placeholder="Anything else I should know? (optional)" rows="3"></textarea>
+            <input id="requestContact" type="text" placeholder="Your name or email, if you want credit/a reply (optional)" autocomplete="off" />
+            <button id="requestSubmitBtn" type="submit">Send request</button>
+          </form>
+        </div>
+      </div>
+
+      <div id="requestStatus" class="status"></div>
+    </div>
+
     <footer>
       Recommendations pulled live from a hand-curated album library.
       <div id="chrisTeaser" class="chris-teaser"></div>
@@ -817,12 +947,28 @@
   const browsePane = document.getElementById('browsePane');
   const recentPane = document.getElementById('recentPane');
   const statsPane = document.getElementById('statsPane');
+  const tabExplore = document.getElementById('tabExplore');
+  const explorePane = document.getElementById('explorePane');
+  const exploreStatus = document.getElementById('exploreStatus');
+  const exploreResultsSection = document.getElementById('exploreResultsSection');
+  const exploreCardsEl = document.getElementById('exploreCards');
+  const exploreShuffleBtn = document.getElementById('exploreShuffleBtn');
+  const tabRequest = document.getElementById('tabRequest');
+  const requestPane = document.getElementById('requestPane');
+  const requestForm = document.getElementById('requestForm');
+  const requestTitle = document.getElementById('requestTitle');
+  const requestArtist = document.getElementById('requestArtist');
+  const requestNote = document.getElementById('requestNote');
+  const requestContact = document.getElementById('requestContact');
+  const requestSubmitBtn = document.getElementById('requestSubmitBtn');
+  const requestStatus = document.getElementById('requestStatus');
   const recentStatus = document.getElementById('recentStatus');
   const recentList = document.getElementById('recentList');
   const statsStatus = document.getElementById('statsStatus');
   const statsContent = document.getElementById('statsContent');
   let recentLoaded = false;
   let statsLoaded = false;
+  let exploreLoaded = false;
 
   const browseTag = document.getElementById('browseTag');
   const browseArtist = document.getElementById('browseArtist');
@@ -1013,7 +1159,8 @@
       matchedCover.innerHTML = sleeveSvg();
     }
 
-    matchedPreview.innerHTML = previewToggleHtml(album.spotify_embed_url);
+    matchedPreview.innerHTML = previewToggleHtml(album.spotify_embed_url) + ratingBlockHtml(album.id);
+    fetchAndApplyCommunityRatings([album.id]);
 
     matchedEl.classList.add('open');
   }
@@ -1038,9 +1185,11 @@
           ${(r.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
         ${previewToggleHtml(r.spotify_embed_url)}
+        ${ratingBlockHtml(r.id)}
       </div>
     `).join('');
     resultsSection.style.display = 'block';
+    fetchAndApplyCommunityRatings(data.results.map(r => r.id));
   }
 
   // Issue #12: renders the preview toggle + (initially empty, hidden)
@@ -1093,6 +1242,117 @@
     </svg>`;
   }
 
+  // Issue: visitor ratings ("I've listened to this"), phase 1 - passive
+  // display only, not fed into the recommender yet. A per-browser random
+  // id (not an account) lets re-rating update instead of duplicate, and
+  // lets the UI remember + highlight what THIS visitor picked.
+  function getVisitorId() {
+    try {
+      let id = localStorage.getItem('visitorId');
+      if (!id) {
+        id = 'v-' + (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now());
+        localStorage.setItem('visitorId', id);
+      }
+      return id;
+    } catch (e) {
+      // Private browsing / blocked storage - fall back to a per-page-load id.
+      if (!window.__visitorIdFallback) {
+        window.__visitorIdFallback = 'v-' + Math.random().toString(36).slice(2) + Date.now();
+      }
+      return window.__visitorIdFallback;
+    }
+  }
+  function getMyRating(albumId) {
+    try { return localStorage.getItem('myRating:' + albumId); } catch (e) { return null; }
+  }
+  function setMyRating(albumId, rating) {
+    try { localStorage.setItem('myRating:' + albumId, String(rating)); } catch (e) { /* ignore */ }
+  }
+
+  function communityRatingHtml(albumId) {
+    return `<div class="community-rating" data-community-for="${albumId}"></div>`;
+  }
+
+  function ratePickerHtml(albumId) {
+    const mine = getMyRating(albumId);
+    const picks = Array.from({ length: 10 }, (_, i) => i + 1)
+      .map(n => `<button type="button" class="rate-pick${String(n) === mine ? ' mine' : ''}" data-rate-album="${albumId}" data-rate-value="${n}">${n}</button>`)
+      .join('');
+    return `
+      <button type="button" class="rate-toggle" data-rate-toggle="${albumId}">${mine ? `You rated this ${mine}` : "I've listened — rate it"}</button>
+      <div class="rate-picker" data-rate-picker="${albumId}" hidden>${picks}</div>
+    `;
+  }
+
+  function ratingBlockHtml(albumId) {
+    return `${communityRatingHtml(albumId)}${ratePickerHtml(albumId)}`;
+  }
+
+  // One delegated listener for every rate-toggle/rate-pick button on the
+  // page, same pattern as the preview-toggle listener below - works for
+  // cards rendered after this runs too (search results, browse, explore).
+  document.addEventListener('click', async (e) => {
+    const toggleBtn = e.target.closest('[data-rate-toggle]');
+    if (toggleBtn) {
+      const albumId = toggleBtn.getAttribute('data-rate-toggle');
+      const picker = document.querySelector(`[data-rate-picker="${albumId}"]`);
+      if (picker) picker.hidden = !picker.hidden;
+      return;
+    }
+    const pickBtn = e.target.closest('[data-rate-value]');
+    if (pickBtn) {
+      const albumId = pickBtn.getAttribute('data-rate-album');
+      const value = parseInt(pickBtn.getAttribute('data-rate-value'), 10);
+      pickBtn.disabled = true;
+      try {
+        const res = await fetch(`${API_BASE}/api/rate-album`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ album_id: albumId, rating: value, visitor_id: getVisitorId() }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        setMyRating(albumId, value);
+        document.querySelectorAll(`[data-rate-toggle="${albumId}"]`).forEach(btn => {
+          btn.textContent = `You rated this ${value}`;
+        });
+        document.querySelectorAll(`[data-rate-picker="${albumId}"] .rate-pick`).forEach(btn => {
+          btn.classList.toggle('mine', btn.getAttribute('data-rate-value') === String(value));
+        });
+        applyCommunityRatings({ [albumId]: data.community });
+      } catch (err) {
+        console.error('Could not submit rating', err);
+      } finally {
+        pickBtn.disabled = false;
+      }
+    }
+  });
+
+  function applyCommunityRatings(ratingsByAlbumId) {
+    Object.entries(ratingsByAlbumId).forEach(([albumId, c]) => {
+      document.querySelectorAll(`[data-community-for="${albumId}"]`).forEach(el => {
+        el.textContent = c && c.count ? `Community: ${c.average} (${c.count})` : '';
+      });
+    });
+  }
+
+  // Batch-fetches community ratings for whatever cards just rendered and
+  // patches the (initially empty) community-rating divs in place - kept
+  // separate from the main cached data fetch so this never risks stale
+  // caching or slowing down the primary card render.
+  async function fetchAndApplyCommunityRatings(albumIds) {
+    const ids = [...new Set(albumIds.filter(Boolean))].slice(0, 100);
+    if (!ids.length || API_BASE.includes('your-backend')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/community-ratings?ids=${ids.map(encodeURIComponent).join(',')}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      applyCommunityRatings(data.ratings || {});
+    } catch (e) {
+      console.error('Could not load community ratings', e);
+    }
+  }
+
   function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, c => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -1104,18 +1364,25 @@
     tabBrowse.classList.toggle('active', tab === 'browse');
     tabRecent.classList.toggle('active', tab === 'recent');
     tabStats.classList.toggle('active', tab === 'stats');
+    tabExplore.classList.toggle('active', tab === 'explore');
+    tabRequest.classList.toggle('active', tab === 'request');
     searchPane.style.display = tab === 'search' ? 'block' : 'none';
     browsePane.style.display = tab === 'browse' ? 'block' : 'none';
     recentPane.style.display = tab === 'recent' ? 'block' : 'none';
     statsPane.style.display = tab === 'stats' ? 'block' : 'none';
+    explorePane.style.display = tab === 'explore' ? 'block' : 'none';
+    requestPane.style.display = tab === 'request' ? 'block' : 'none';
     if (tab === 'browse' && !facetsLoaded) loadFacets();
     if (tab === 'recent' && !recentLoaded) loadRecent();
     if (tab === 'stats' && !statsLoaded) loadStats();
+    if (tab === 'explore' && !exploreLoaded) loadExplore();
   }
   tabSearch.addEventListener('click', () => switchTab('search'));
   tabBrowse.addEventListener('click', () => switchTab('browse'));
   tabRecent.addEventListener('click', () => switchTab('recent'));
   tabStats.addEventListener('click', () => switchTab('stats'));
+  tabExplore.addEventListener('click', () => switchTab('explore'));
+  tabRequest.addEventListener('click', () => switchTab('request'));
 
   function setBrowseStatus(msg, isError = false) {
     browseStatus.style.display = msg ? 'block' : 'none';
@@ -1243,6 +1510,7 @@
           ${(r.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
         ${previewToggleHtml(r.spotify_embed_url)}
+        ${ratingBlockHtml(r.id)}
       </div>
     `).join('');
 
@@ -1252,6 +1520,7 @@
       browseCardsEl.innerHTML = cardsHtml;
     }
     browseResultsSection.style.display = 'block';
+    fetchAndApplyCommunityRatings(data.albums.map(r => r.id));
   }
 
   function setRecentStatus(msg, isError = false) {
@@ -1305,11 +1574,13 @@
           <div class="artist">${escapeHtml(a.artist_names || 'Unknown artist')}${a.rating ? ' · My rating: ' + a.rating : ''}</div>
           <div class="tags">${(a.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>
           ${previewToggleHtml(a.spotify_embed_url)}
+          ${ratingBlockHtml(a.id)}
         </div>
         <span class="recent-badge ${a.edited ? 'edited' : 'added'}">${a.edited ? 'Edited' : 'Added'}</span>
         <span class="recent-date">${formatDate(a.edited ? a.edited_at : a.added_at)}</span>
       </div>
     `).join('');
+    fetchAndApplyCommunityRatings(albums.map(a => a.id));
   }
 
   function setStatsStatus(msg, isError = false) {
@@ -1450,6 +1721,122 @@
 
     statsContent.innerHTML = overview + albumsSection + artistsSection + genresSection + histogramSection + decadeSection;
   }
+
+  function setExploreStatus(msg, isError = false) {
+    exploreStatus.style.display = msg ? 'block' : 'none';
+    exploreStatus.textContent = msg || '';
+    exploreStatus.classList.toggle('error', isError);
+  }
+
+  // Issue #24: a shuffled pick of highly-rated albums, for when you want to
+  // rediscover something already loved instead of searching by title. Each
+  // Shuffle click re-requests the endpoint, which re-shuffles and re-applies
+  // its own diversity caps server-side, so repeated clicks genuinely jump
+  // around the shelf rather than always surfacing the same top slice.
+  async function loadExplore(attempt = 1) {
+    if (API_BASE.includes('your-backend')) {
+      setExploreStatus('Backend URL not set yet — edit API_BASE at the top of the <script> tag in index.html.', true);
+      return;
+    }
+    exploreShuffleBtn.disabled = true;
+    if (attempt === 1) setExploreStatus('Pulling some favorites…');
+    try {
+      const res = await fetch(`${API_BASE}/api/explore`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      exploreLoaded = true;
+      if (!data.albums || !data.albums.length) {
+        setExploreStatus('No albums rated highly enough yet.');
+        exploreResultsSection.style.display = 'none';
+        return;
+      }
+      setExploreStatus('');
+      renderExplore(data.albums);
+    } catch (e) {
+      console.error('Could not load explore picks', e);
+      if (attempt < 4) {
+        setTimeout(() => loadExplore(attempt + 1), attempt * 4000);
+        return;
+      }
+      setExploreStatus('Could not reach the backend. Try again shortly.', true);
+    } finally {
+      exploreShuffleBtn.disabled = false;
+    }
+  }
+  exploreShuffleBtn.addEventListener('click', () => loadExplore());
+
+  function renderExplore(albums) {
+    exploreCardsEl.innerHTML = albums.map((r, i) => `
+      <div class="card" style="animation-delay:${(i % 20) * 60}ms">
+        <div class="cover ${r.cover_url ? '' : 'placeholder'}">
+          ${r.cover_url ? `<img src="${r.cover_url}" alt="${escapeHtml(r.title)} cover" loading="lazy" onerror="this.parentElement.classList.add('placeholder'); this.parentElement.innerHTML = sleeveSvg();" />` : sleeveSvg()}
+        </div>
+        <h3>${escapeHtml(r.title)}</h3>
+        <div class="artist">${escapeHtml(r.artist_names || 'Unknown artist')}</div>
+        <div class="meta-row">
+          <span>${r.release_year || '—'}</span>
+          <span>${r.rating ? '· My rating: ' + r.rating : ''}</span>
+        </div>
+        <div class="tags">
+          ${(r.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
+        </div>
+        ${previewToggleHtml(r.spotify_embed_url)}
+        ${ratingBlockHtml(r.id)}
+      </div>
+    `).join('');
+    exploreResultsSection.style.display = 'block';
+    fetchAndApplyCommunityRatings(albums.map(r => r.id));
+  }
+
+  function setRequestStatus(msg, isError = false) {
+    requestStatus.style.display = msg ? 'block' : 'none';
+    requestStatus.textContent = msg || '';
+    requestStatus.classList.toggle('error', isError);
+  }
+
+  // Issue #20: intake only — logs the request to Supabase for Chris to read
+  // later. No notification system yet (that part of the issue is still an
+  // open brainstorm), so the contact field is optional and purely informal.
+  requestForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const album_title = requestTitle.value.trim();
+    const artist_name = requestArtist.value.trim();
+    if (!album_title || !artist_name) {
+      setRequestStatus('Album title and artist are both required.', true);
+      return;
+    }
+    if (API_BASE.includes('your-backend')) {
+      setRequestStatus('Backend URL not set yet — edit API_BASE at the top of the <script> tag in index.html.', true);
+      return;
+    }
+    requestSubmitBtn.disabled = true;
+    requestSubmitBtn.textContent = 'Sending…';
+    setRequestStatus('');
+    try {
+      const res = await fetch(`${API_BASE}/api/request-album`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          album_title,
+          artist_name,
+          note: requestNote.value.trim() || null,
+          requester_contact: requestContact.value.trim() || null,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      requestForm.reset();
+      setRequestStatus('Thanks — request sent!');
+    } catch (err) {
+      console.error('Could not send album request', err);
+      setRequestStatus('Could not send that — try again shortly.', true);
+    } finally {
+      requestSubmitBtn.disabled = false;
+      requestSubmitBtn.textContent = 'Send request';
+    }
+  });
 
   // Issue #13: a small self-promo teaser for the developer's own music,
   // separate from #12's per-album previews. Picks one track at random
