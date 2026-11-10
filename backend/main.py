@@ -738,12 +738,68 @@ def recommend(title: str, n: int = 5, artist: Optional[str] = None):
         for _, row in results.iterrows()
     ]
 
+    _log_recommendation(
+        query_text=title,
+        query_artist_hint=artist,
+        n_requested=n,
+        matched_album_id=matched_album.id,
+        matched_title=matched_row["title"],
+        result_album_ids=[r.id for r in recs],
+        result_similarities=[r.similarity for r in recs],
+    )
+
     return RecommendResponse(
         query=title,
         matched_title=matched_row["title"],
         matched_album=matched_album,
         results=recs,
     )
+
+
+def _log_recommendation(
+    query_text: str,
+    query_artist_hint: Optional[str],
+    n_requested: int,
+    matched_album_id: str,
+    matched_title: str,
+    result_album_ids: list,
+    result_similarities: list,
+) -> None:
+    """Best-effort usage logging for a successful /api/recommend match,
+    into a dedicated recommend_logs table — insert-only RLS, same pattern
+    as album_requests/listener_ratings (see the comment on
+    /api/request-album), so this stays consistent with the module's
+    read-only-by-design principle even though it's a write.
+
+    This is the usage telemetry the book-research proposal doc's "ML
+    engineering discipline" section flagged as missing (2026-11):
+    previously there was no record at all of what this endpoint actually
+    returns for real queries, which the hand-review sampling and
+    listener_ratings online-signal pieces of the eval framework both
+    depend on. Migration to create recommend_logs is in
+    config/queries/recommend_logs_migration.sql — run once, manually
+    (schema changes aren't made by this service).
+
+    Never raises: a logging failure (migration not yet applied, a
+    transient Supabase hiccup, anything) must never break a real
+    recommendation request. Silently a no-op if recommend_logs doesn't
+    exist yet.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        supabase.table("recommend_logs").insert({
+            "query_text": query_text,
+            "query_artist_hint": query_artist_hint,
+            "n_requested": n_requested,
+            "matched_album_id": matched_album_id,
+            "matched_title": matched_title,
+            "result_album_ids": result_album_ids,
+            "result_similarities": result_similarities,
+        }).execute()
+    except Exception as e:
+        print(f"Warning: recommend_logs insert failed (non-fatal, logging only): {e}")
 
 
 RECENT_WINDOW_DAYS = 14
