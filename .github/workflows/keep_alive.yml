@@ -1,0 +1,28 @@
+name: Keep Backend Warm
+
+# Render's free tier spins down the backend after 15 minutes of no traffic,
+# so the first real visitor request after a quiet period takes 30-60s to
+# wake it back up (see README's "Heads up on the free tier" note, and the
+# frontend's "Waking up the library…" retry logic in loadTitles()). Pinging
+# a lightweight endpoint every 10 minutes — comfortably under the 15-minute
+# idle threshold — keeps the service warm so visitors never hit a cold start
+# at all, at the cost of effectively-continuous (but very cheap: one GET
+# every 10 min) traffic against the free tier's usage allowance.
+#
+# /api/albums is used as the ping target rather than adding a dedicated
+# /health route: it's already a cheap, read-only, no-side-effect GET that
+# exists today, so this needs no backend change to start working.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the backend
+        run: |
+          curl -fsS --max-time 60 "https://album-recs-api.onrender.com/api/albums" > /dev/null \
+            && echo "Backend responded OK" \
+            || echo "Backend ping failed (likely still waking up or a real outage) — not failing the job, next run will retry"
