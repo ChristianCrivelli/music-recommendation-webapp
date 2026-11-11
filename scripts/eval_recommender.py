@@ -27,6 +27,35 @@ is the single biggest driver of recommendation quality in this library):
     no tags at all with the query (only meaningful for tagged queries -
     it's 100% by definition for untagged ones)
   - mean_similarity: average displayed similarity score for the #1 rec
+  - mean_ild: mean intra-list diversity of each query's top-N list (1 -
+    mean pairwise cosine similarity among the N recommended albums,
+    TOP_N_FOR_DIVERSITY below) — low ILD means a query's results tend to
+    be near-duplicates of each other, not just of the query itself.
+Plus one number for the whole run, not split by tagged/untagged (it's a
+property of the library's reachability, not of any one query):
+  - catalog_coverage: the fraction of the library that shows up in ANY
+    query's top-N list across this whole run — a rough proxy for "is the
+    long tail reachable at all," or whether the same handful of albums
+    just keep winning every query.
+
+── Goal (Building Intelligent Systems ch. 4's three-part test — states
+the outcome, is achievable, is measurable with what already exists) ──
+Reduce zero_tag_overlap_top1_rate among tagged albums, and the untagged
+fraction of the library, without making same_artist_top1_rate worse.
+Tag coverage, not the scoring formula, is this recommender's identified
+bottleneck (issue #23) — this goal is written against that bottleneck on
+purpose, not against mean_similarity or any other number a scoring-
+formula change could move without actually improving anything a person
+would notice.
+
+── Discipline, before changing any constant in this file or main.py ──
+Run this script and write down the actual numbers FIRST. Change one
+thing. Run it again and compare. Don't iterate by eye against a single
+run — that's tuning to the test set (Building Intelligent Systems'
+"Independent Evaluation Data"; the Handbook calls the same mistake
+"tuning to the test set"), and this script's numbers are the only
+feedback loop available for a single-user library with no held-out
+ground truth, so protecting them from that mistake is the whole point.
 """
 import os
 import sys
@@ -52,6 +81,12 @@ NUMERIC_WEIGHT = 0.5
 TAG_CONFIDENCE_FLOOR = 0.4
 MIN_CONFIDENT_TAG_OVERLAP = 2
 SAME_ARTIST_PENALTY = 0.6
+
+# How many results to look at for the diversity/coverage metrics below —
+# matches /api/recommend's own default `n`, since that's what a real
+# visitor actually sees per query, not an arbitrary evaluation-only
+# number.
+TOP_N_FOR_DIVERSITY = 5
 
 
 def paginate(query_builder_fn, page_size=1000):
@@ -140,34 +175,80 @@ def build_feature_matrix(df: pd.DataFrame) -> np.ndarray:
     ])
 
 
-def top1_recommendation(df, feature_matrix, idx):
+def _scored_results(df, feature_matrix, idx):
+    """The same scoring steps /api/recommend applies (TF-IDF cosine
+    similarity, tag-confidence discount, same-artist penalty), returning
+    every OTHER album sorted best-first with similarity/tag_overlap/
+    same_artist columns attached. Factored out of top1_recommendation so
+    the diversity/coverage metrics below can look at more than just the
+    #1 result without duplicating this logic a second time."""
     matched_row = df.loc[idx]
     sim_scores = cosine_similarity([feature_matrix[idx]], feature_matrix)[0]
     results = df.copy()
     results["similarity"] = sim_scores
 
     query_tags = set(matched_row["tags"])
-    tag_overlap = results["tags"].apply(lambda t: len(query_tags & set(t)))
+    results["tag_overlap"] = results["tags"].apply(lambda t: len(query_tags & set(t)))
     confidence = TAG_CONFIDENCE_FLOOR + (1 - TAG_CONFIDENCE_FLOOR) * (
-        tag_overlap.clip(upper=MIN_CONFIDENT_TAG_OVERLAP) / MIN_CONFIDENT_TAG_OVERLAP
+        results["tag_overlap"].clip(upper=MIN_CONFIDENT_TAG_OVERLAP) / MIN_CONFIDENT_TAG_OVERLAP
     )
     results["similarity"] *= confidence
 
-    same_artist = results["artist_mbids"].apply(lambda a: bool(set(matched_row["artist_mbids"]) & set(a)))
-    results.loc[same_artist, "similarity"] *= SAME_ARTIST_PENALTY
+    results["same_artist"] = results["artist_mbids"].apply(lambda a: bool(set(matched_row["artist_mbids"]) & set(a)))
+    results.loc[results["same_artist"], "similarity"] *= SAME_ARTIST_PENALTY
 
-    results = results[results.index != idx].sort_values("similarity", ascending=False)
-    top = results.iloc[0]
+    return results[results.index != idx].sort_values("similarity", ascending=False)
+
+
+def top1_recommendation(df, feature_matrix, idx):
+    top = _scored_results(df, feature_matrix, idx).iloc[0]
     return {
-        "same_artist": bool(same_artist.loc[top.name]),
-        "tag_overlap": int(tag_overlap.loc[top.name]),
+        "same_artist": bool(top["same_artist"]),
+        "tag_overlap": int(top["tag_overlap"]),
         "similarity": float(top["similarity"]),
     }
 
 
+def topn_indices(df, feature_matrix, idx, n=TOP_N_FOR_DIVERSITY):
+    """The query's top-n result indices (into df/feature_matrix), same
+    ordering /api/recommend would return. Used by diversity_and_coverage_
+    report below — kept separate from top1_recommendation so a caller
+    that only needs the #1 result (the common case) doesn't pay for or
+    depend on the rest of the list."""
+    return _scored_results(df, feature_matrix, idx).head(n).index.tolist()
+
+
+def intra_list_diversity(feature_matrix, result_indices):
+    """1 - mean pairwise cosine similarity among a result list's own
+    feature vectors — the standard ILD metric (Recommender Systems
+    Handbook's novelty/diversity chapter). 0.0 means every result in the
+    list is identical to every other; higher means the list spans more
+    ground rather than being five variations on one theme. Undefined
+    (None) for a list of fewer than 2 albums — nothing to pair up."""
+    if len(result_indices) < 2:
+        return None
+    vectors = feature_matrix[result_indices]
+    sims = cosine_similarity(vectors)
+    n = len(result_indices)
+    # Mean of the OFF-diagonal entries only (upper triangle, k=1) — the
+    # diagonal is each album against itself (similarity 1.0 by
+    # definition) and would just dilute the real pairwise comparisons.
+    off_diagonal = sims[np.triu_indices(n, k=1)]
+    return 1.0 - float(off_diagonal.mean())
+
+
 def run_report(df, feature_matrix):
     has_tags = df["tags"].apply(len) > 0
-    rows = [top1_recommendation(df, feature_matrix, idx) for idx in df.index]
+
+    rows = []
+    all_recommended = set()
+    for idx in df.index:
+        row = top1_recommendation(df, feature_matrix, idx)
+        result_indices = topn_indices(df, feature_matrix, idx)
+        row["ild"] = intra_list_diversity(feature_matrix, result_indices)
+        all_recommended.update(result_indices)
+        rows.append(row)
+
     report = pd.DataFrame(rows)
     report["has_tags"] = has_tags.values
 
@@ -178,11 +259,18 @@ def run_report(df, feature_matrix):
         print(f"    same_artist_top1_rate:      {subset['same_artist'].mean():.1%}")
         print(f"    zero_tag_overlap_top1_rate: {(subset['tag_overlap'] == 0).mean():.1%}")
         print(f"    mean_similarity:            {subset['similarity'].mean():.3f}")
+        ild_values = subset["ild"].dropna()
+        if not ild_values.empty:
+            print(f"    mean_ild (top-{TOP_N_FOR_DIVERSITY}):           {ild_values.mean():.3f}")
 
     print(f"Library: {len(df)} albums ({has_tags.sum()} tagged, {(~has_tags).sum()} untagged)\n")
     summarize(report, "all")
     summarize(report[report["has_tags"]], "tagged only")
     summarize(report[~report["has_tags"]], "untagged only")
+
+    coverage = len(all_recommended) / len(df) if len(df) else 0.0
+    print(f"\n  catalog_coverage (any query's top-{TOP_N_FOR_DIVERSITY}): {coverage:.1%} "
+          f"({len(all_recommended)}/{len(df)} albums ever recommended)")
 
 
 def main():
